@@ -114,10 +114,8 @@ class mLSTM(nn.Module):
         attn_weights = torch.softmax(attn_scores, dim=-1)
         
         attn_output = torch.matmul(attn_weights, v)
-
-        attn_output = self.sig(self.saoa1(attn_output)) * self.saoa2(attn_output) #adaptive
-
-        
+        out = out + attn_output
+        attn_output = self.sig(self.saoa1(out)) * self.saoa2(out) #adaptive
         out = out + attn_output
         
         i_gate = torch.exp(self.i_gate(out))
