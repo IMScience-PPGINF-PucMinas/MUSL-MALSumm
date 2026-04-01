@@ -132,7 +132,8 @@ def run_inference(model, data_path, keys, eval_method, save_summary, dataset, ve
         frame_features, user_summary, sb, n_frames, positions, video_name = load_video_data(dataset, data_path, video)
 
         with torch.no_grad():
-            scores, _ = model(frame_features)
+            #scores, _ = model(frame_features)
+            scores, attn_weights, _, _ = model(frame_features)
             scores = scores.squeeze(0).cpu().numpy().tolist()
 
             summary = generate_summary([sb], [scores], [n_frames], [positions])[0]
