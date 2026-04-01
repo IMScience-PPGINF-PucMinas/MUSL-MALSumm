@@ -1,5 +1,53 @@
 import torch
 import torch.nn as nn
+from torch.distributions import Bernoulli
+
+
+class RLAttentionActorCritic(nn.Module):
+    def __init__(self, hidden_dim, max_seq_len):
+        super().__init__()
+
+        self.max_seq_len = max_seq_len
+
+        self.shared = nn.Sequential(
+            nn.Linear(hidden_dim + max_seq_len, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU()
+        )
+
+        self.actor = nn.Linear(128, max_seq_len)
+        self.critic = nn.Linear(128, 1)
+
+    def forward(self, hidden_state, attn_weights):
+        B, T, H = hidden_state.shape
+
+        # padding (caso T < max_seq_len)
+        if T < self.max_seq_len:
+            pad_size = self.max_seq_len - T
+            pad = torch.zeros(B, pad_size, device=hidden_state.device)
+        
+        h_summary = hidden_state.mean(dim=1)              # [B, H]
+        attn_summary = attn_weights.mean(dim=1)           # [B, T]
+
+        if T < self.max_seq_len:
+            attn_summary = torch.cat([attn_summary, pad], dim=-1)
+
+        state = torch.cat([h_summary, attn_summary], dim=-1)
+
+        features = self.shared(state)
+
+        probs = torch.sigmoid(self.actor(features))       # [B, max_seq_len]
+
+        probs = probs[:, :T]  # corta para tamanho real
+
+        dist = Bernoulli(probs)
+        actions = dist.sample()
+        log_probs = dist.log_prob(actions)
+
+        value = self.critic(features)
+
+        return actions, log_probs, value
 
 class SEBlock(nn.Module):
     def __init__(self, channel, reduction=16):
@@ -102,6 +150,9 @@ class mLSTM(nn.Module):
         self.fc = nn.Linear(hidden_dim, input_size)
         
         self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        self.rl_attn = RLAttentionActorCritic(hidden_dim, max_seq_len=200)  # ajuste conforme seu dataset
+
     
     def forward(self, x):
         out, _ = self.lstm(x)
@@ -112,7 +163,13 @@ class mLSTM(nn.Module):
         
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (out.size(-1) ** 0.5)  # Scale attention scores
         attn_weights = torch.softmax(attn_scores, dim=-1)
-        
+
+        actions, log_probs, value = self.rl_attn(out, attn_weights)
+
+        attn_weights = attn_weights * (actions.unsqueeze(1) + 1e-6)
+
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+
         attn_output = torch.matmul(attn_weights, v)
         out = out + attn_output
         attn_output = self.sig(self.saoa1(out)) * self.saoa2(out) #adaptive
@@ -136,7 +193,7 @@ class mLSTM(nn.Module):
         
         out = self.drop(out)
         out = self.fc(out)
-        return out, attn_weights
+        return out, attn_weights, log_probs, value
 
 
 if __name__ == '__main__':

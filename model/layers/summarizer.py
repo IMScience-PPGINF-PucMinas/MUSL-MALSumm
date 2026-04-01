@@ -21,7 +21,7 @@ class xLSTM(nn.Module):
 
     def forward(self, x):
         x_slstm = self.slstm(x)
-        x_mlstm, attn_weights = self.mlstm(x_slstm)
+        x_mlstm, attn_weights, log_probs, value = self.mlstm(x_slstm)
 
         # try with and without this
         gate = torch.sigmoid(self.attn_linear(x_slstm + x_mlstm))
