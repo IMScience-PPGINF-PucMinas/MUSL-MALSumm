@@ -34,8 +34,7 @@ class xLSTM(nn.Module):
         output = self.fc_output(output)
         output = output.view(output.size(0), -1)
         
-        return output, attn_weights
-
+        return output, attn_weights, log_probs, value
 
 if __name__ == '__main__':
     pass

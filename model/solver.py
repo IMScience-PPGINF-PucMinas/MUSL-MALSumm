@@ -32,7 +32,6 @@ class Solver:
             random.seed(self.config.seed)
 
     def build(self):
-        """Construct the PGL-SUM model and initialize its parameters."""
         self._initialize_model()
         self._initialize_optimizer_and_writer()
 
@@ -103,44 +102,30 @@ class Solver:
 
     def _process_batch(self, iterator):
         batch_loss = 0
-        alpha = 0.1  # peso do RL (ajustável)
+        alpha = 0.1
 
         for _ in range(self.config.batch_size):
             frame_features, target = next(iterator)
             frame_features = frame_features.to(self.config.device)
             target = target.to(self.config.device)
 
-            # 🔥 FORWARD COM RL
             output, attn_weights, log_probs, value = self.model(frame_features.squeeze(0))
 
-            # Ajuste de dimensão
             output_adjusted = output.squeeze() if output.dim() > 1 else output.squeeze().mean(dim=1)
 
-            # 🎯 LOSS SUPERVISIONADA (original)
             loss_sup = nn.MSELoss()(output_adjusted, target.squeeze(0))
 
-            # =========================================================
-            # 🎯 REWARD (aproximação diferenciável)
-            # =========================================================
             with torch.no_grad():
-                reward = -loss_sup.detach()  # quanto menor MSE, maior reward
+                reward = -loss_sup.detach()
 
-            # =========================================================
-            # 🎯 ACTOR-CRITIC
-            # =========================================================
             advantage = reward - value.squeeze()
 
-            # Actor (policy gradient)
             actor_loss = -(log_probs * advantage.detach()).mean()
 
-            # Critic (value regression)
             critic_loss = advantage.pow(2).mean()
 
             rl_loss = actor_loss + critic_loss
 
-            # =========================================================
-            # 🎯 LOSS FINAL
-            # =========================================================
             loss = loss_sup + alpha * rl_loss
 
             loss.backward()
