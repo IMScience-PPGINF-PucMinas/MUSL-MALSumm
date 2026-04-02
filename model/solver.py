@@ -94,7 +94,6 @@ class Solver:
                 mode='min',
                 factor=0.5,
                 patience=10,
-                verbose=True,
             )
 
             self.writer = TensorboardWriter(str(self.config.log_dir))

@@ -272,6 +272,15 @@ class mLSTM(nn.Module):
         # Modulação por RL: ações binárias mascaram frames menos relevantes
         actions, log_probs, value = self.rl_attn(out, attn_weights)
 
+        B, T, _ = attn_weights.shape
+
+        # 🔥 Ajuste crítico
+        if actions.size(1) < T:
+            pad = torch.ones(B, T - actions.size(1), device=actions.device)
+            actions = torch.cat([actions, pad], dim=1)
+        elif actions.size(1) > T:
+            actions = actions[:, :T]
+
         # Repondera os pesos de atenção com a máscara aprendida pelo actor
         attn_weights = attn_weights * (actions.unsqueeze(1) + 1e-6)
         attn_weights = torch.softmax(attn_weights, dim=-1)
