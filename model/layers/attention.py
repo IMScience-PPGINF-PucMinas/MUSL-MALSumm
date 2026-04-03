@@ -128,7 +128,7 @@ class sLSTM(nn.Module):
 
         # dropout ignorado pelo PyTorch com num_layers=1; mantido para
         # compatibilidade caso num_layers seja aumentado futuramente.
-        self.lstm = nn.LSTM(conv_channels, hidden_dim, num_layers=1,
+        self.lstm = nn.LSTM(conv_channels, hidden_dim, num_layers=2,
                             batch_first=True, dropout=dropout)
         self.gn   = nn.GroupNorm(num_groups, hidden_dim)
 
