@@ -251,13 +251,15 @@ def main():
 
         for file in all_epoch_files:
             epoch_num = int(re.findall(r'\d+', file)[0])
+
             model = xLSTM(
                 input_size=1024,
                 output_size=1024,
                 num_segments=4,
                 hidden_dim=512,
                 num_layers=2,
-                dropout=0.2
+                dropout=0.5,
+                max_seq_len = 500
             )
             model.load_state_dict(torch.load(join(model_path, file)))
 

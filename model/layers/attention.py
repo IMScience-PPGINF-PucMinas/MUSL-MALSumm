@@ -233,8 +233,8 @@ class mLSTM(nn.Module):
         self.c_gate = nn.Linear(hidden_dim, hidden_dim)
 
         # Gate adaptativo SAOA
-        self.saoa1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.saoa2 = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        #self.saoa1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        #self.saoa2 = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         self.sig        = nn.Sigmoid()
         self.drop       = nn.Dropout(dropout)
@@ -274,7 +274,7 @@ class mLSTM(nn.Module):
 
         B, T, _ = attn_weights.shape
 
-        # 🔥 Ajuste crítico
+        #Ajuste crítico
         if actions.size(1) < T:
             pad = torch.ones(B, T - actions.size(1), device=actions.device)
             actions = torch.cat([actions, pad], dim=1)
@@ -289,8 +289,8 @@ class mLSTM(nn.Module):
         out = out + attn_output
 
         # Gate adaptativo SAOA
-        attn_output = self.sig(self.saoa1(out)) * self.saoa2(out)
-        out = out + attn_output
+        #attn_output = self.sig(self.saoa1(out)) * self.saoa2(out)
+        #out = out + attn_output
 
         # Gates de balanço de memória (competição normalizada entre i, f, o)
         i_gate = torch.exp(self.i_gate(out))
