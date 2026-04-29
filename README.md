@@ -1,6 +1,6 @@
-# Extended Memory-Augmented Long Short-Term Memory for Dynamic Video Summarization
+# Memory-Augmented Long Short-Term Memory for Dynamic Video Summarization
 PyTorch code for our Sibgrapi 2025 paper "Memory-Augmented Long Short-Term Memory for Dynamic Video Summarization" Enhanced
-by [Leonardo Vilela Cardoso](http://lattes.cnpq.br/6741312586742178), [Silvio Jamil F. Guimarães](http://lattes.cnpq.br/8522089151904453) and 
+by [Leonardo Vilela Cardoso](http://lattes.cnpq.br/6741312586742178), [Barbara Hellen P. Soraggi](http://lattes.cnpq.br/9625828407766581), [Silvio Jamil F. Guimarães](http://lattes.cnpq.br/8522089151904453) and 
 [Zenilton K. G. Patrocínio Jr](http://lattes.cnpq.br/8895634496108399), 
 
 Capturing relevant content from videos while preserving temporal coherence remains a central challenge in video skimming. The prevalence of redundant information often hinders the extraction of meaningful content, especially when the goal is to retain the central narrative of the video. While scene change detection can aid in segmenting video content, conventional methods often struggle with highly diverse and repetitive scenes due to their limited ability to model temporal dependencies and detect transitions effectively. To address these limitations, we propose the \methodNamefull\ -- \methodName, a supervised architecture based on Extended Long Short-Term Memory (xLSTM) networks that enhances memory capacity through a dual-path design. This design integrates weighted memory to evaluate local and global information, allowing the model to preserve fine-grained details while maintaining overall temporal consistency, all within a low-complexity framework. Experimental results validate the effectiveness of our approach, achieving an average F-score of 49.7 on the SumMe dataset and 62.1 on TVSum, outperforming recent supervised baselines. Additionally, when measuring alignment with human annotations, the model attains a Kendall's $\tau$ of 0.180 and Spearman's $\rho$ of 0.242, exceeding the scores reported for human agreement. These findings demonstrate that our method provides a competitive and lightweight solution for dynamic video summarization, effectively balancing accuracy and efficiency.
@@ -88,5 +88,5 @@ If you find this code useful for your research, consider cite our paper:
 ```
 
 ## Others
-This code used resources from the following projects for the evaluation process: 
+This code used resources from the following projects: 
 [PGL-Sum](https://github.com/e-apostolidis/PGL-SUM/)

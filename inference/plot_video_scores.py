@@ -395,7 +395,7 @@ def plot_split(split_id, dataset, model_path, epoch_fname,
 
             # --- Model inference ---
             with torch.no_grad():
-                scores, _, _, _ = model(features)
+                scores, _ = model(features)
                 scores = scores.squeeze(0).cpu().numpy()
 
             # --- Single normalisation pass (never repeated downstream) ---
@@ -484,7 +484,6 @@ def main():
     parser.add_argument('--hidden_dim',    type=int,  default=512)
     parser.add_argument('--num_layers',    type=int,  default=2)
     parser.add_argument('--dropout',       type=float, default=0.5)
-    parser.add_argument('--max_seq_len',   type=int,  default=500)
 
     args = vars(parser.parse_args())
 
@@ -505,7 +504,6 @@ def main():
         hidden_dim=args['hidden_dim'],
         num_layers=args['num_layers'],
         dropout=args['dropout'],
-        max_seq_len=args['max_seq_len'],
     )
 
     paths        = get_paths(dataset)
