@@ -14,12 +14,8 @@ class SEBlock(nn.Module):
 
     def forward(self, x):
         b, c, _ = x.size()
-        # print(f"SEBlock input shape: {x.shape}")
-        # print(f"b: {b}, c: {c}")
         y = self.avg_pool(x).view(b, c)
-        # print(f"Shape after avg_pool and view: {y.shape}")
         y = self.fc(y).view(b, c, 1)
-        # print(f"Shape after fc and view: {y.shape}")
         return x * y.expand_as(x)
 
 
@@ -31,11 +27,12 @@ class sLSTM(nn.Module):
         conv_channels=128,
         dropout=0.5,
         num_groups=16,
-        max_len=1024,       # ponto 3: tamanho máximo de sequência para pos. encoding
-        num_heads=8,        # ponto 2: cabeças de atenção temporal
+        max_len=1024,
+        num_heads=8,
     ):
         super(sLSTM, self).__init__()
  
+        self.input_proj = nn.Conv1d(input_size, conv_channels, kernel_size=1)
         self.conv3 = nn.Conv1d(input_size, conv_channels, kernel_size=3, padding=1)
         self.conv5 = nn.Conv1d(input_size, conv_channels, kernel_size=5, padding=2)
         self.conv7 = nn.Conv1d(input_size, conv_channels, kernel_size=7, padding=3)
@@ -82,13 +79,13 @@ class sLSTM(nn.Module):
             x = x.unsqueeze(1)
  
         x = x.permute(0, 2, 1)          # (B, input_size, T) → conv espera (B, C, T)
- 
+        residual = self.input_proj(x) 
         c3 = self.conv3(x)
         c5 = self.conv5(x)
         c7 = self.conv7(x)
         x = torch.cat([c3, c5, c7], dim=1)
         x = self.conv_fusion(x)          # (B, conv_channels, T)
- 
+        x = fusion + residual 
         x = x.permute(0, 2, 1)          # (B, T, conv_channels)
  
         T = x.size(1)
@@ -162,7 +159,7 @@ class mLSTM(nn.Module):
         k = self.k_proj(out)
         v = self.v_proj(out)
         
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (out.size(-1) ** 0.5)  # Scale attention scores
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (out.size(-1) ** 0.5)
         attn_weights = torch.softmax(attn_scores, dim=-1)
         
         attn_output = torch.matmul(attn_weights, v)
