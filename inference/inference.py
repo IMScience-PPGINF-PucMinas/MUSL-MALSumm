@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import argparse
+from typing import List, Dict, Tuple, Optional
 from os import listdir
 from os.path import join
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -65,13 +66,13 @@ def load_video_data(dataset: str, data_path: str, video: str):
     return frame_features, user_summary, sb, n_frames, positions, video_name
 
 
-def _find_epoch_files(model_path: str) -> list[str]:
+def _find_epoch_files(model_path: str) -> List[str]:
     """Return all epoch-N.pkl files in model_path, sorted by epoch number."""
     files = [f for f in listdir(model_path) if re.match(r"epoch-\d+\.pkl", f)]
     return sorted(files, key=lambda x: int(re.findall(r"\d+", x)[0]))
 
 
-def _load_best_epoch_from_fscores(model_path: str) -> int | None:
+def _load_best_epoch_from_fscores(model_path: str) -> Optional[int]:
     """Read pre-computed f_scores.txt produced by compute_fscores.py.
 
     Returns the best epoch index (0-indexed), or None if the file is absent.
@@ -101,7 +102,7 @@ def _load_model(model_path: str, fname: str, model_kwargs: dict) -> torch.nn.Mod
 def run_inference(
     model: torch.nn.Module,
     data_path: str,
-    keys: list[str],
+    keys: List[str],
     eval_method: str,
     save_summary: bool,
     dataset: str,
@@ -119,11 +120,11 @@ def run_inference(
     dataset_lower = dataset.lower()
     summe = dataset_lower == "summe"
 
-    video_fscores:   list[float] = []
-    video_kendalls:  list[float] = []
-    video_spearmans: list[float] = []
-    video_summaries: dict        = {}
-    video_names:     dict        = {}
+    video_fscores:      List[float] = []
+    video_kendalls:     List[float] = []
+    video_spearmans:    List[float] = []
+    video_summaries:    Dict = {}
+    video_names:        Dict = {}
 
     for video in keys:
         if summe:
@@ -216,7 +217,7 @@ def _scan_split_worker(args: tuple):
      dataset_path, test_keys,
      eval_metric, dataset, model_kwargs, verbose) = args
 
-    results: dict[int, tuple[float, float, float]] = {}
+    results: Dict[int, Tuple[float, float, float]] = {}
 
     for fname in epoch_files:
         epoch_num = int(re.findall(r"\d+", fname)[0])
@@ -234,7 +235,7 @@ def _scan_split_worker(args: tuple):
 
 
 def _run_full_scan_parallel(
-    split_ids: list[int],
+    split_ids: List[int],
     split_configs: dict,
     n_workers: int,
 ) -> dict:
@@ -249,7 +250,7 @@ def _run_full_scan_parallel(
     n_workers = min(n_workers, len(split_ids))
     print(f"Full scan: {n_workers} parallel thread(s) across {len(split_ids)} splits\n")
 
-    output: dict = {}
+    output: Dict = {}
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
@@ -301,7 +302,7 @@ def _print_results(
     print(f"{sep}\n")
 
 
-def _save_xlsx(split_ids: list[int], all_epoch_results: dict, dataset: str):
+def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str):
     """Save full per-epoch metrics to an xlsx file.
 
     Imported lazily so pandas/openpyxl add zero overhead in the fast path.
@@ -317,9 +318,9 @@ def _save_xlsx(split_ids: list[int], all_epoch_results: dict, dataset: str):
     })
 
     rows   = {"Epoch": all_epochs}
-    avg_fs: dict[int, float] = {}
-    avg_ks: dict[int, float] = {}
-    avg_ss: dict[int, float] = {}
+    avg_fs: Dict[int, float] = {}
+    avg_ks: Dict[int, float] = {}
+    avg_ss: Dict[int, float] = {}
 
     for ep in all_epochs:
         vf = [all_epoch_results[s][ep][0] for s in split_ids if ep in all_epoch_results.get(s, {})]
@@ -420,7 +421,7 @@ def main():
           f"  |  device: {DEVICE}")
 
     if save_results:
-        split_configs: dict = {}
+        split_configs: Dict = {}
         for split_id in split_ids:
             model_path = (
                 f"Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}"
@@ -452,9 +453,9 @@ def main():
             list(split_configs.keys()), split_configs, n_workers
         )
 
-        best_epochs:       dict = {}
-        split_results:     dict = {}
-        all_epoch_results: dict = {}
+        best_epochs:        Dict = {}
+        split_results:      Dict = {}
+        all_epoch_results:  Dict = {}
 
         for sid, (best_epoch, results) in scan_output.items():
             best_epochs[sid]       = best_epoch
@@ -462,8 +463,8 @@ def main():
             all_epoch_results[sid] = results
 
     else:
-        best_epochs:   dict = {}
-        split_results: dict = {}
+        best_epochs: Dict = {}
+        split_results: Dict = {}
 
         for split_id in split_ids:
             model_path = (
