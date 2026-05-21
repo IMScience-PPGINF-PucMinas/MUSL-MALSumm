@@ -37,6 +37,8 @@ class sLSTM(nn.Module):
         self.conv5 = nn.Conv1d(input_size, conv_channels, kernel_size=5, padding=2)
         self.conv7 = nn.Conv1d(input_size, conv_channels, kernel_size=7, padding=3)
         self.conv_fusion = nn.Conv1d(conv_channels * 3, conv_channels, kernel_size=1)
+
+        self.alpha = nn.Parameter(torch.full((conv_channels,), -1.0))
  
         self.max_len = max_len
         self.pos_emb = nn.Embedding(max_len, conv_channels)
@@ -85,7 +87,8 @@ class sLSTM(nn.Module):
         c7 = self.conv7(x)
         x = torch.cat([c3, c5, c7], dim=1)
         x = self.conv_fusion(x)          # (B, conv_channels, T)
-        x = x + residual 
+        alpha = torch.sigmoid(self.alpha).view(1, -1, 1)
+        x = x + alpha * residual
         x = x.permute(0, 2, 1)          # (B, T, conv_channels)
  
         T = x.size(1)
