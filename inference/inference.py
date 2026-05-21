@@ -14,6 +14,10 @@ import numpy as np
 import torch
 from scipy.stats import kendalltau, spearmanr
 
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment
+
 from utils.utils import get_paths, setup_logging
 from evaluation.evaluation_metrics import evaluate_summary
 from model.layers.summarizer import xLSTM
@@ -25,19 +29,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"Using device: {DEVICE}"
              + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
 
-
 def load_video_data(dataset: str, data_path: str, video: str):
-    """Load video data from the dataset h5 file.
-
-    Returns:
-        frame_features  – FloatTensor of shape (T, 1024), already on CPU
-                          (caller moves it to DEVICE before the forward pass)
-        user_summary    – np.ndarray
-        sb              – np.ndarray  (shot boundaries)
-        n_frames        – int
-        positions       – np.ndarray[int]
-        video_name      – str | None  (only for SumMe)
-    """
     dataset_lower = dataset.lower()
     with h5py.File(data_path, "r") as hdf:
         frame_features = torch.from_numpy(
@@ -65,18 +57,11 @@ def load_video_data(dataset: str, data_path: str, video: str):
 
     return frame_features, user_summary, sb, n_frames, positions, video_name
 
-
 def _find_epoch_files(model_path: str) -> List[str]:
-    """Return all epoch-N.pkl files in model_path, sorted by epoch number."""
     files = [f for f in listdir(model_path) if re.match(r"epoch-\d+\.pkl", f)]
     return sorted(files, key=lambda x: int(re.findall(r"\d+", x)[0]))
 
-
 def _load_best_epoch_from_fscores(model_path: str) -> Optional[int]:
-    """Read pre-computed f_scores.txt produced by compute_fscores.py.
-
-    Returns the best epoch index (0-indexed), or None if the file is absent.
-    """
     fscores_path = join(model_path, "f_scores.txt")
     if not os.path.exists(fscores_path):
         return None
@@ -88,16 +73,13 @@ def _load_best_epoch_from_fscores(model_path: str) -> Optional[int]:
         scores = [float(x) for x in content.splitlines()]
     return int(np.argmax(scores))
 
-
 def _load_model(model_path: str, fname: str, model_kwargs: dict) -> torch.nn.Module:
-    """Instantiate xLSTM, load weights, move to DEVICE, set eval mode."""
     model = xLSTM(**model_kwargs)
     state = torch.load(join(model_path, fname), map_location=DEVICE)
     model.load_state_dict(state)
     model.to(DEVICE)
     model.eval()
     return model
-
 
 def run_inference(
     model: torch.nn.Module,
@@ -108,15 +90,6 @@ def run_inference(
     dataset: str,
     verbose: bool = False,
 ):
-    """Run inference for a single model checkpoint over all test videos.
-
-    The model must already be on DEVICE and in eval mode.
-
-    Returns:
-        (mean_fscore, mean_kendall, mean_spearman, video_summaries)
-        or, for SumMe:
-        (mean_fscore, mean_kendall, mean_spearman, video_summaries, video_names)
-    """
     dataset_lower = dataset.lower()
     summe = dataset_lower == "summe"
 
@@ -197,22 +170,7 @@ def run_inference(
         return mean_fscore, mean_kendall, mean_spearman, video_summaries, video_names
     return mean_fscore, mean_kendall, mean_spearman, video_summaries
 
-
 def _scan_split_worker(args: tuple):
-    """Evaluate all epoch checkpoints for a single split.
-
-    Runs inside a thread (ThreadPoolExecutor). All model I/O is serialised by
-    PyTorch's internal CUDA stream management; no extra locking is needed for
-    inference-only workloads.
-
-    Args:
-        args: (split_id, model_path, epoch_files, dataset_path,
-               test_keys, eval_metric, dataset, model_kwargs, verbose)
-
-    Returns:
-        (split_id, best_epoch, results_dict)
-        where results_dict maps epoch_num → (fscore, kendall, spearman).
-    """
     (split_id, model_path, epoch_files,
      dataset_path, test_keys,
      eval_metric, dataset, model_kwargs, verbose) = args
@@ -233,20 +191,11 @@ def _scan_split_worker(args: tuple):
     best_epoch = max(results, key=lambda e: results[e][0])
     return split_id, best_epoch, results
 
-
 def _run_full_scan_parallel(
     split_ids: List[int],
     split_configs: dict,
     n_workers: int,
 ) -> dict:
-    """Run full epoch scan for all splits in parallel (thread pool).
-
-    Using threads instead of processes lets all workers share the same CUDA
-    context — model weights stay on GPU and there is no pickle overhead.
-
-    Returns:
-        dict mapping split_id → (best_epoch, results_dict)
-    """
     n_workers = min(n_workers, len(split_ids))
     print(f"Full scan: {n_workers} parallel thread(s) across {len(split_ids)} splits\n")
 
@@ -271,8 +220,6 @@ def _run_full_scan_parallel(
                 logging.error(f"  Split {split_id} failed: {exc}", exc_info=True)
 
     return output
-
-
 
 def _print_results(
     split_ids, best_epochs, split_results,
@@ -301,16 +248,7 @@ def _print_results(
     )
     print(f"{sep}\n")
 
-
 def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str):
-    """Save full per-epoch metrics to an xlsx file.
-
-    Imported lazily so pandas/openpyxl add zero overhead in the fast path.
-    """
-    import pandas as pd
-    from openpyxl import load_workbook
-    from openpyxl.styles import Alignment
-
     all_epochs = sorted({
         ep
         for s in split_ids
@@ -363,8 +301,6 @@ def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str):
     wb.save(xlsx_path)
 
     print(f"Full epoch metrics saved → {xlsx_path}")
-
-
 
 def main():
     parser = argparse.ArgumentParser(
