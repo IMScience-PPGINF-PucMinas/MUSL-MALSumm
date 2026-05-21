@@ -34,9 +34,10 @@ class xLSTM(nn.Module):
         x_combined = gate * x_slstm + (1 - gate) * x_mlstm
         # x_combined = (x_slstm + x_mlstm) / 2
         
-        x_se = self.se_block(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
+        #x_se = self.se_block(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
 
-        output = self.fc(x_se)
+        #output = self.fc(x_se)
+        output = self.fc(x_combined)
         output = self.fc_output(output)
         output = output.view(output.size(0), -1)
         
