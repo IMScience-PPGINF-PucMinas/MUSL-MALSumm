@@ -6,6 +6,7 @@ from .attention import sLSTM, mLSTM, SEBlock
 class xLSTM(nn.Module):
     def __init__(self, input_size, output_size, num_segments, hidden_dim=512, num_layers=2, dropout=0.5, lstm_type='mLSTM'):
         super(xLSTM, self).__init__()
+        self.input_proj = nn.Conv1d(input_size, 128, kernel_size=1)
         self.slstm = sLSTM(input_size, hidden_dim, dropout=dropout)
         self.mlstm = mLSTM(input_size, hidden_dim, num_layers=num_layers, dropout=dropout)
 
@@ -16,7 +17,12 @@ class xLSTM(nn.Module):
         self.attn_softmax = nn.Softmax(dim=-1)
         
         self.fc = nn.Linear(input_size, output_size)
-        self.fc_output = nn.Linear(output_size, 1)
+        self.fc_output = nn.Sequential(
+            nn.Linear(output_size, output_size // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(output_size // 2, 1)
+        )
         self.num_segments = num_segments
 
     def count_parameters(self):
@@ -27,7 +33,7 @@ class xLSTM(nn.Module):
 
     def forward(self, x):
         x_slstm = self.slstm(x)
-        x_mlstm, attn_weights = self.mlstm(x)
+        x_mlstm, attn_weights = self.mlstm(self.input_proj(x))
 
         # try with and without this
         gate = torch.sigmoid(self.attn_linear(x_slstm + x_mlstm))
