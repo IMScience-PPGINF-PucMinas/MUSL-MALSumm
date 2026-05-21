@@ -105,8 +105,9 @@ class sLSTM(nn.Module):
         out = self.gn(out)
         out = out.permute(0, 2, 1)       # (B, T, hidden_dim)
  
-        attn_out, _ = self.temporal_attn(out, out, out)
-        out = self.attn_norm(out + attn_out)   # residual + layer norm
+        #attn_out, _ = self.temporal_attn(out, out, out)
+        out, _ = self.temporal_attn(out, out, out)
+        #out = self.attn_norm(out + attn_out)   # residual + layer norm
  
         i_gate = torch.sigmoid(self.i_gate(out))
         f_gate = torch.sigmoid(self.f_gate(out))
