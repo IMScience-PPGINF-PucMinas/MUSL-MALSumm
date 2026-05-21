@@ -43,7 +43,7 @@ class sLSTM(nn.Module):
  
         self.ln = nn.LayerNorm(conv_channels)
         self.lstm = nn.LSTM(
-            conv_channels, hidden_dim, num_layers=1, batch_first=True, dropout=dropout
+            conv_channels, hidden_dim, num_layers=2, batch_first=True, dropout=dropout
         )
         self.gn = nn.GroupNorm(num_groups, hidden_dim)
  
