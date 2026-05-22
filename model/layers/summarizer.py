@@ -18,18 +18,12 @@ class xLSTM(nn.Module):
     ):
         super(xLSTM, self).__init__()
 
-        # ---------------------------------------------------
-        # Residual projection
-        # ---------------------------------------------------
         self.input_proj = nn.Conv1d(
             input_size,
             hidden_dim,
             kernel_size=1
         )
 
-        # ---------------------------------------------------
-        # Parallel recurrent branches
-        # ---------------------------------------------------
         self.slstm = sLSTM(
             input_size,
             hidden_dim,
@@ -43,23 +37,15 @@ class xLSTM(nn.Module):
             dropout=dropout
         )
 
-        # ---------------------------------------------------
-        # Gated fusion
-        # ---------------------------------------------------
         self.attn_linear = nn.Linear(
-            hidden_dim * 2,
-            hidden_dim
+            input_size * 2,
+            input_size
         )
 
-        # ---------------------------------------------------
-        # Channel attention
-        # ---------------------------------------------------
+        self.fusion_proj = nn.Linear(input_size, hidden_dim)
+
         self.se_block = SEBlock(hidden_dim)
 
-        # ---------------------------------------------------
-        # Temporal refinement
-        # Depthwise temporal convolution
-        # ---------------------------------------------------
         self.temporal_refine = nn.Conv1d(
             hidden_dim,
             hidden_dim,
@@ -68,14 +54,8 @@ class xLSTM(nn.Module):
             groups=hidden_dim
         )
 
-        # ---------------------------------------------------
-        # Normalization
-        # ---------------------------------------------------
         self.norm = nn.LayerNorm(hidden_dim)
 
-        # ---------------------------------------------------
-        # Prediction head
-        # ---------------------------------------------------
         self.fc = nn.Linear(
             hidden_dim,
             output_size
@@ -103,94 +83,60 @@ class xLSTM(nn.Module):
         print(f"Trainable parameters: {trainable:,}")
 
     def forward(self, x):
-        """
-        Input:
-            x -> (B, T, input_size) ou (T, input_size)
-        """
-        # ---------------------------------------------------
-        # Garante dimensão de batch
-        # ---------------------------------------------------
         squeeze_output = False
         if x.dim() == 2:
-            x = x.unsqueeze(0)   # (T, C) -> (1, T, C)
+            x = x.unsqueeze(0)      # (T, C) -> (1, T, C)
             squeeze_output = True
 
-        # ---------------------------------------------------
-        # Residual projection
-        # Conv1d expects (B, C, T)
-        # ---------------------------------------------------
         residual = self.input_proj(
             x.permute(0, 2, 1)
-        ).permute(0, 2, 1)
+        ).permute(0, 2, 1)          # (B, T, hidden_dim)
 
-        # ---------------------------------------------------
-        # Parallel recurrent branches
-        # ---------------------------------------------------
-        x_slstm = self.slstm(x)
+        x_slstm = self.slstm(x)                    # (B, T, input_size)
+        x_mlstm, attn_weights = self.mlstm(x)      # (B, T, input_size)
 
-        x_mlstm, attn_weights = self.mlstm(x)
-
-        # ---------------------------------------------------
-        # Gated fusion
-        # ---------------------------------------------------
         fusion_input = torch.cat(
-            [x_slstm, x_mlstm],
-            dim=-1
-        )
+            [x_slstm, x_mlstm], dim=-1
+        )                                           # (B, T, input_size * 2)
 
         gate = torch.sigmoid(
             self.attn_linear(fusion_input)
-        )
+        )                                           # (B, T, input_size)
 
         x_combined = (
             gate * x_slstm +
             (1.0 - gate) * x_mlstm
-        )
+        )                                           # (B, T, input_size)
 
-        # ---------------------------------------------------
-        # Global residual connection
-        # ---------------------------------------------------
-        x_combined = x_combined + residual
+        x_combined = self.fusion_proj(x_combined)  # (B, T, hidden_dim)
 
-        # ---------------------------------------------------
-        # SE channel refinement
-        # ---------------------------------------------------
+        x_combined = x_combined + residual          # (B, T, hidden_dim)
+
         x_se = self.se_block(
             x_combined.permute(0, 2, 1)
-        ).permute(0, 2, 1)
+        ).permute(0, 2, 1)                          # (B, T, hidden_dim)
 
         x_combined = x_combined + x_se
 
-        # ---------------------------------------------------
-        # Temporal refinement
-        # ---------------------------------------------------
         x_ref = self.temporal_refine(
             x_combined.permute(0, 2, 1)
-        ).permute(0, 2, 1)
+        ).permute(0, 2, 1)                          # (B, T, hidden_dim)
 
         x_combined = x_combined + x_ref
 
-        # ---------------------------------------------------
-        # Final normalization
-        # ---------------------------------------------------
-        x_combined = self.norm(x_combined)
+        x_combined = self.norm(x_combined)          # (B, T, hidden_dim)
 
-        # ---------------------------------------------------
-        # Prediction head
-        # ---------------------------------------------------
-        output = self.fc(x_combined)
-        output = self.fc_output(output)
+        output = self.fc(x_combined)                # (B, T, output_size)
+        output = self.fc_output(output)             # (B, T, 1)
+        output = output.squeeze(-1)                 # (B, T)
 
-        # (B, T, 1) -> (B, T)
-        output = output.squeeze(-1)
-
-        # ---------------------------------------------------
-        # Remove dimensão de batch se foi adicionada aqui
-        # ---------------------------------------------------
         if squeeze_output:
-            output = output.squeeze(0)        # (1, T) -> (T,)
-            # attn_weights pode ser None ou tensor — trata os dois casos
+            output = output.squeeze(0)              # (1, T) -> (T,)
             if attn_weights is not None and attn_weights.dim() == 3:
                 attn_weights = attn_weights.squeeze(0)
 
         return output, attn_weights
+
+
+if __name__ == '__main__':
+    pass
