@@ -109,7 +109,7 @@ class Solver:
             frame_features, target = frame_features.to(self.config.device), target.to(self.config.device)
 
             output, _ = self.model(frame_features.squeeze(0))
-            output_adjusted = output.squeeze() if output.dim() > 1 else output.squeeze().mean(dim=1)
+            output_adjusted = output.mean(dim=0) if output.dim() > 1 else output
 
             loss = nn.MSELoss()(output_adjusted, target.squeeze(0))
             loss.backward()
@@ -156,7 +156,7 @@ class Solver:
         frame_features = frame_features.view(-1, self.config.input_size).to(self.config.device)
         with torch.no_grad():
             scores, attn_weights = self.model(frame_features)
-            scores = scores.squeeze(0).cpu().numpy().tolist()
+            scores = (scores.squeeze(0) if scores.dim() > 1 else scores).cpu().numpy().tolist()
             attn_weights = attn_weights.cpu().numpy()
         return scores, attn_weights
 
