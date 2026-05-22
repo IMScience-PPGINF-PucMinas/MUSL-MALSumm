@@ -105,8 +105,15 @@ class xLSTM(nn.Module):
     def forward(self, x):
         """
         Input:
-            x -> (B, T, input_size)
+            x -> (B, T, input_size) ou (T, input_size)
         """
+        # ---------------------------------------------------
+        # Garante dimensão de batch
+        # ---------------------------------------------------
+        squeeze_output = False
+        if x.dim() == 2:
+            x = x.unsqueeze(0)   # (T, C) -> (1, T, C)
+            squeeze_output = True
 
         # ---------------------------------------------------
         # Residual projection
@@ -172,14 +179,18 @@ class xLSTM(nn.Module):
         # Prediction head
         # ---------------------------------------------------
         output = self.fc(x_combined)
-
         output = self.fc_output(output)
 
         # (B, T, 1) -> (B, T)
         output = output.squeeze(-1)
 
+        # ---------------------------------------------------
+        # Remove dimensão de batch se foi adicionada aqui
+        # ---------------------------------------------------
+        if squeeze_output:
+            output = output.squeeze(0)        # (1, T) -> (T,)
+            # attn_weights pode ser None ou tensor — trata os dois casos
+            if attn_weights is not None and attn_weights.dim() == 3:
+                attn_weights = attn_weights.squeeze(0)
+
         return output, attn_weights
-
-
-if __name__ == '__main__':
-    pass
