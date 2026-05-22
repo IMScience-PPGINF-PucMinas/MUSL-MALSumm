@@ -13,7 +13,7 @@ class xLSTM(nn.Module):
         self.se_block = SEBlock(input_size)
         self.conv = nn.Conv1d(input_size, hidden_dim, kernel_size=1)
         
-        self.attn_linear = nn.Linear(input_size, input_size)
+        self.attn_linear = nn.Linear(hidden_dim * 2, hidden_dim)
         self.attn_softmax = nn.Softmax(dim=-1)
         
         self.fc = nn.Linear(input_size, output_size)
@@ -25,6 +25,14 @@ class xLSTM(nn.Module):
         )
         self.num_segments = num_segments
 
+        self.temporal_refine = nn.Conv1d(
+            hidden_dim,
+            hidden_dim,
+            kernel_size=3,
+            padding=1,
+            groups=hidden_dim
+        )
+
     def count_parameters(self):
         total = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -32,17 +40,30 @@ class xLSTM(nn.Module):
         print(f"Trainable parameters: {trainable:,}")
 
     def forward(self, x):
+        residual = self.input_proj(x)
+
         x_slstm = self.slstm(x)
-        x_mlstm, attn_weights = self.mlstm(self.input_proj(x))
+        x_mlstm, attn_weights = self.mlstm(x_slstm)
 
-        # try with and without this
-        gate = torch.sigmoid(self.attn_linear(x_slstm + x_mlstm))
+        fusion_input = torch.cat([x_slstm, x_mlstm], dim=-1)
+        gate = torch.sigmoid(self.attn_linear(fusion_input))
+
         x_combined = gate * x_slstm + (1 - gate) * x_mlstm
-        # x_combined = (x_slstm + x_mlstm) / 2
-        
-        #x_se = self.se_block(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
 
-        #output = self.fc(x_se)
+        x_combined = x_combined + residual
+
+        x_combined = self.norm(x_combined)
+        
+        x_se = self.se_block(x_combined.permute(0,2,1)).permute(0,2,1)
+
+        x_combined = x_combined + x_se
+
+        x_ref = x_combined.permute(0,2,1)
+        x_ref = self.temporal_refine(x_ref)
+        x_ref = x_ref.permute(0,2,1)
+
+        x_combined = x_combined + x_ref
+        
         output = self.fc(x_combined)
         output = self.fc_output(output)
         output = output.view(output.size(0), -1)
