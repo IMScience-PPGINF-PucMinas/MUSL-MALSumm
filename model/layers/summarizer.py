@@ -112,9 +112,9 @@ class xLSTM(nn.Module):
 
         x_combined = x_combined + residual          # (B, T, hidden_dim)
 
-        #x_se = self.se_block(
-        #    x_combined.permute(0, 2, 1)
-        #).permute(0, 2, 1)                          # (B, T, hidden_dim)
+        x_se = self.se_block(
+            x_combined.permute(0, 2, 1)
+        ).permute(0, 2, 1)                          # (B, T, hidden_dim)
 
         #x_combined = x_combined + x_se
 
