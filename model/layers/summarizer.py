@@ -18,12 +18,18 @@ class xLSTM(nn.Module):
     ):
         super(xLSTM, self).__init__()
 
+        # ---------------------------------------------------
+        # Residual projection
+        # ---------------------------------------------------
         self.input_proj = nn.Conv1d(
             input_size,
             hidden_dim,
             kernel_size=1
         )
 
+        # ---------------------------------------------------
+        # Parallel recurrent branches
+        # ---------------------------------------------------
         self.slstm = sLSTM(
             input_size,
             hidden_dim,
@@ -37,13 +43,23 @@ class xLSTM(nn.Module):
             dropout=dropout
         )
 
+        # ---------------------------------------------------
+        # Gated fusion
+        # ---------------------------------------------------
         self.attn_linear = nn.Linear(
             hidden_dim * 2,
             hidden_dim
         )
 
+        # ---------------------------------------------------
+        # Channel attention
+        # ---------------------------------------------------
         self.se_block = SEBlock(hidden_dim)
 
+        # ---------------------------------------------------
+        # Temporal refinement
+        # Depthwise temporal convolution
+        # ---------------------------------------------------
         self.temporal_refine = nn.Conv1d(
             hidden_dim,
             hidden_dim,
@@ -52,9 +68,18 @@ class xLSTM(nn.Module):
             groups=hidden_dim
         )
 
+        # ---------------------------------------------------
+        # Normalization
+        # ---------------------------------------------------
         self.norm = nn.LayerNorm(hidden_dim)
 
-        self.fc = nn.Linear(hidden_dim, output_size)
+        # ---------------------------------------------------
+        # Prediction head
+        # ---------------------------------------------------
+        self.fc = nn.Linear(
+            hidden_dim,
+            output_size
+        )
 
         self.fc_output = nn.Sequential(
             nn.Linear(output_size, output_size // 2),
@@ -67,6 +92,7 @@ class xLSTM(nn.Module):
 
     def count_parameters(self):
         total = sum(p.numel() for p in self.parameters())
+
         trainable = sum(
             p.numel()
             for p in self.parameters()
@@ -78,18 +104,28 @@ class xLSTM(nn.Module):
 
     def forward(self, x):
         """
-        x shape:
-            (B, T, input_size)
+        Input:
+            x -> (B, T, input_size)
         """
 
+        # ---------------------------------------------------
+        # Residual projection
+        # Conv1d expects (B, C, T)
+        # ---------------------------------------------------
         residual = self.input_proj(
             x.permute(0, 2, 1)
         ).permute(0, 2, 1)
 
+        # ---------------------------------------------------
+        # Parallel recurrent branches
+        # ---------------------------------------------------
         x_slstm = self.slstm(x)
 
         x_mlstm, attn_weights = self.mlstm(x)
 
+        # ---------------------------------------------------
+        # Gated fusion
+        # ---------------------------------------------------
         fusion_input = torch.cat(
             [x_slstm, x_mlstm],
             dim=-1
@@ -104,30 +140,43 @@ class xLSTM(nn.Module):
             (1.0 - gate) * x_mlstm
         )
 
+        # ---------------------------------------------------
+        # Global residual connection
+        # ---------------------------------------------------
         x_combined = x_combined + residual
 
+        # ---------------------------------------------------
+        # SE channel refinement
+        # ---------------------------------------------------
         x_se = self.se_block(
             x_combined.permute(0, 2, 1)
         ).permute(0, 2, 1)
 
         x_combined = x_combined + x_se
 
+        # ---------------------------------------------------
+        # Temporal refinement
+        # ---------------------------------------------------
         x_ref = self.temporal_refine(
             x_combined.permute(0, 2, 1)
         ).permute(0, 2, 1)
 
         x_combined = x_combined + x_ref
 
+        # ---------------------------------------------------
+        # Final normalization
+        # ---------------------------------------------------
         x_combined = self.norm(x_combined)
 
+        # ---------------------------------------------------
+        # Prediction head
+        # ---------------------------------------------------
         output = self.fc(x_combined)
 
         output = self.fc_output(output)
 
-        output = output.view(
-            output.size(0),
-            -1
-        )
+        # (B, T, 1) -> (B, T)
+        output = output.squeeze(-1)
 
         return output, attn_weights
 
