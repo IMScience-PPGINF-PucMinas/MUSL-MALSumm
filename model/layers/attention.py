@@ -14,12 +14,8 @@ class SEBlock(nn.Module):
 
     def forward(self, x):
         b, c, _ = x.size()
-        # print(f"SEBlock input shape: {x.shape}")
-        # print(f"b: {b}, c: {c}")
         y = self.avg_pool(x).view(b, c)
-        # print(f"Shape after avg_pool and view: {y.shape}")
         y = self.fc(y).view(b, c, 1)
-        # print(f"Shape after fc and view: {y.shape}")
         return x * y.expand_as(x)
 
 
@@ -77,8 +73,8 @@ class sLSTM(nn.Module):
         out = self.gn(out)
         out = out.permute(0, 2, 1)
         
-        i_gate = torch.exp(self.i_gate(out))
-        f_gate = torch.exp(self.f_gate(out))
+        i_gate = torch.sigmoid(self.i_gate(out))
+        f_gate = torch.sigmoid(self.f_gate(out))
         o_gate = torch.sigmoid(self.o_gate(out))
         
         m_gate = torch.max(torch.log(f_gate) + self.m_gate, torch.log(i_gate))
@@ -130,9 +126,9 @@ class mLSTM(nn.Module):
         
         out = out + attn_output
         
-        i_gate = torch.exp(self.i_gate(out))
-        f_gate = torch.exp(self.f_gate(out))
-        o_gate = torch.exp(self.o_gate(out))
+        i_gate = torch.sigmoid(self.i_gate(out))
+        f_gate = torch.sigmoid(self.f_gate(out))
+        o_gate = torch.sigmoid(self.o_gate(out))
         gate_sum = i_gate + f_gate + o_gate + 1e-6
         
         i_gate = i_gate / gate_sum

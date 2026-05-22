@@ -211,3 +211,4 @@ Summaries/
 SumMe_epoch_metrics.xlsx
 TVSum_epoch_metrics.xlsx
 .DS_Store
+plots/
