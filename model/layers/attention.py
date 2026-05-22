@@ -27,7 +27,7 @@ class sLSTM(nn.Module):
         conv_channels=128,
         dropout=0.5,
         num_groups=16,
-        max_len=1024,
+        max_len=10000,
         num_heads=8,
     ):
         super(sLSTM, self).__init__()
@@ -92,7 +92,9 @@ class sLSTM(nn.Module):
         x = x.permute(0, 2, 1)          # (B, T, conv_channels)
  
         T = x.size(1)
-        positions = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
+        # Clamp para nunca ultrapassar max_len — vídeos com T > max_len
+        # reutilizam os últimos embeddings em vez de explodir o índice CUDA
+        positions = torch.arange(T, device=x.device).unsqueeze(0).clamp(max=self.max_len - 1)
         x = x + self.pos_emb(positions)  # broadcast sobre o batch
  
         x = self.ln(x)
