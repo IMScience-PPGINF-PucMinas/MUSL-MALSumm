@@ -43,7 +43,7 @@ class xLSTM(nn.Module):
         residual = self.input_proj(x)
 
         x_slstm = self.slstm(x)
-        x_mlstm, attn_weights = self.mlstm(x_slstm)
+        x_mlstm, attn_weights = self.mlstm(x)
 
         fusion_input = torch.cat([x_slstm, x_mlstm], dim=-1)
         gate = torch.sigmoid(self.attn_linear(fusion_input))
