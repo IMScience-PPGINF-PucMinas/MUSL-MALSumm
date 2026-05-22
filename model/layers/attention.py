@@ -79,13 +79,13 @@ class sLSTM(nn.Module):
             x = x.unsqueeze(1)
  
         x = x.permute(0, 2, 1)          # (B, input_size, T) → conv espera (B, C, T)
-        residual = self.input_proj(x) 
+        #residual = self.input_proj(x) 
         c3 = self.conv3(x)
         c5 = self.conv5(x)
         c7 = self.conv7(x)
         x = torch.cat([c3, c5, c7], dim=1)
         x = self.conv_fusion(x)          # (B, conv_channels, T)
-        x = x + residual 
+        #x = x + residual 
         x = x.permute(0, 2, 1)          # (B, T, conv_channels)
  
         T = x.size(1)
