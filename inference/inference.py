@@ -1,68 +1,76 @@
-# -*- coding: utf-8 -*-
-import re
-import os
 import json
 import logging
-import argparse
-from typing import List, Dict, Tuple, Optional
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from os import listdir
 from os.path import join
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
 import h5py
 import numpy as np
-import torch
-from scipy.stats import kendalltau, spearmanr
-
 import pandas as pd
+import torch
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
+from scipy.stats import kendalltau, spearmanr
 
-from utils.utils import get_paths, setup_logging
 from evaluation.evaluation_metrics import evaluate_summary
-from model.layers.summarizer import xLSTM
 from inference.generate_summary import generate_summary
+from model.layers.summarizer import xLSTM
+from utils.utils import get_paths, setup_logging
+
+import argparse
 
 setup_logging()
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logging.info(f"Using device: {DEVICE}"
-             + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logging.info(
+    'Using device: ' + str(DEVICE)
+    + (f' ({torch.cuda.get_device_name(0)})' if DEVICE.type == 'cuda' else '')
+)
 
-def load_video_data(dataset: str, data_path: str, video: str):
+
+def load_video_data(
+    dataset: str,
+    data_path: str,
+    video: str,
+) -> Tuple[torch.Tensor, np.ndarray, np.ndarray, int, np.ndarray, Optional[str]]:
     dataset_lower = dataset.lower()
-    with h5py.File(data_path, "r") as hdf:
+
+    with h5py.File(data_path, 'r') as hdf:
         frame_features = torch.from_numpy(
-            np.array(hdf[f"{video}/features"], dtype=np.float32)
-        ).view(-1, 1024)                      # shape: (T, 1024)
+            np.array(hdf[f'{video}/features'], dtype=np.float32)
+        ).view(-1, 1024)
+        sb = np.array(hdf[f'{video}/change_points'])
 
-        sb = np.array(hdf[f"{video}/change_points"])
-
-        if dataset_lower in ("summe", "tvsum"):
-            user_summary = np.array(hdf[f"{video}/user_summary"])
-            n_frames     = int(np.array(hdf[f"{video}/n_frames"]))
-            positions    = np.array(hdf[f"{video}/picks"], dtype=np.int64)
-            video_name   = (
-                str(np.array(hdf[f"{video}/video_name"]).astype(str))
-                if "video_name" in hdf[f"{video}"]
+        if dataset_lower in ('summe', 'tvsum'):
+            user_summary = np.array(hdf[f'{video}/user_summary'])
+            n_frames = int(np.array(hdf[f'{video}/n_frames']))
+            positions = np.array(hdf[f'{video}/picks'], dtype=np.int64)
+            video_name = (
+                str(np.array(hdf[f'{video}/video_name']).astype(str))
+                if f'{video}/video_name' in hdf
                 else None
             )
-        elif dataset_lower == "mrhisum":
-            user_summary = np.array(hdf[f"{video}/gt_summary"])
-            n_frames     = frame_features.shape[0]
-            positions    = np.arange(n_frames, dtype=np.int64)
-            video_name   = None
+        elif dataset_lower == 'mrhisum':
+            user_summary = np.array(hdf[f'{video}/gt_summary'])
+            n_frames = frame_features.shape[0]
+            positions = np.arange(n_frames, dtype=np.int64)
+            video_name = None
         else:
-            raise ValueError(f"Unsupported dataset: {dataset!r}")
+            raise ValueError(f'Unsupported dataset: {dataset!r}')
 
     return frame_features, user_summary, sb, n_frames, positions, video_name
 
+
 def _find_epoch_files(model_path: str) -> List[str]:
-    files = [f for f in listdir(model_path) if re.match(r"epoch-\d+\.pkl", f)]
-    return sorted(files, key=lambda x: int(re.findall(r"\d+", x)[0]))
+    files = [f for f in listdir(model_path) if re.match(r'epoch-\d+\.pkl', f)]
+    return sorted(files, key=lambda x: int(re.findall(r'\d+', x)[0]))
+
 
 def _load_best_epoch_from_fscores(model_path: str) -> Optional[int]:
-    fscores_path = join(model_path, "f_scores.txt")
+    fscores_path = join(model_path, 'f_scores.txt')
     if not os.path.exists(fscores_path):
         return None
     with open(fscores_path) as fp:
@@ -73,13 +81,14 @@ def _load_best_epoch_from_fscores(model_path: str) -> Optional[int]:
         scores = [float(x) for x in content.splitlines()]
     return int(np.argmax(scores))
 
+
 def _load_model(model_path: str, fname: str, model_kwargs: dict) -> torch.nn.Module:
     model = xLSTM(**model_kwargs)
     state = torch.load(join(model_path, fname), map_location=DEVICE)
     model.load_state_dict(state)
-    model.to(DEVICE)
-    model.eval()
+    model.to(DEVICE).eval()
     return model
+
 
 def run_inference(
     model: torch.nn.Module,
@@ -89,37 +98,37 @@ def run_inference(
     save_summary: bool,
     dataset: str,
     verbose: bool = False,
-):
+) -> tuple:
     dataset_lower = dataset.lower()
-    summe = dataset_lower == "summe"
+    is_summe = dataset_lower == 'summe'
 
-    video_fscores:      List[float] = []
-    video_kendalls:     List[float] = []
-    video_spearmans:    List[float] = []
-    video_summaries:    Dict = {}
-    video_names:        Dict = {}
+    video_fscores: List[float] = []
+    video_kendalls: List[float] = []
+    video_spearmans: List[float] = []
+    video_summaries: Dict = {}
+    video_names: Dict = {}
 
     for video in keys:
-        if summe:
+        if is_summe:
             try:
-                if int(video.split("_")[1]) > 25:
+                if int(video.split('_')[1]) > 25:
                     continue
             except (IndexError, ValueError):
                 pass
 
-        frame_features, user_summary, sb, n_frames, positions, vname = \
-            load_video_data(dataset, data_path, video)
+        frame_features, user_summary, sb, n_frames, positions, vname = load_video_data(
+            dataset, data_path, video
+        )
 
         with torch.no_grad():
             scores, _ = model(frame_features.to(DEVICE))
-            # scores: (1, T) or (T,) → flat Python list on CPU
             scores = scores.squeeze(0).cpu().numpy().tolist()
 
         summary = generate_summary([sb], [scores], [n_frames], [positions])[0]
         f_score = evaluate_summary(summary, user_summary, eval_method)
 
         frame_init_scores = np.asarray(scores, dtype=np.float64)
-        frame_scores      = np.zeros(n_frames, dtype=np.float64)
+        frame_scores = np.zeros(n_frames, dtype=np.float64)
         pos = positions.astype(np.int64)
         if pos[-1] != n_frames:
             pos = np.concatenate([pos, [n_frames]])
@@ -128,49 +137,45 @@ def run_inference(
                 frame_init_scores[i] if i < len(frame_init_scores) else 0.0
             )
 
-        gt_importance = (
-            user_summary.mean(axis=0) if user_summary.ndim > 1 else user_summary
-        )
+        gt_importance = user_summary.mean(axis=0) if user_summary.ndim > 1 else user_summary
 
         if frame_scores.shape[0] != gt_importance.shape[0]:
             logging.warning(
-                f"Shape mismatch for {video}: "
-                f"pred={frame_scores.shape[0]}, gt={gt_importance.shape[0]} "
-                "— skipping correlations"
+                f'Shape mismatch for {video}: '
+                f'pred={frame_scores.shape[0]}, gt={gt_importance.shape[0]} — skipping correlations'
             )
-            ktau = spr = float("nan")
+            ktau = spr = float('nan')
         else:
             ktau, _ = kendalltau(frame_scores, gt_importance)
-            spr,  _ = spearmanr(frame_scores,  gt_importance)
+            spr, _ = spearmanr(frame_scores, gt_importance)
 
         video_fscores.append(f_score)
         video_kendalls.append(ktau)
         video_spearmans.append(spr)
         video_summaries[video] = summary
-        if summe:
+        if is_summe:
             video_names[video] = vname
 
         if verbose:
-            logging.info(
-                f"  {video} ({vname}): F1={f_score:.2f}%  τ={ktau:.4f}  ρ={spr:.4f}"
-            )
+            logging.info(f'  {video} ({vname}): F1={f_score:.2f}%  τ={ktau:.4f}  ρ={spr:.4f}')
 
         if save_summary:
-            out   = {str(i): int(v) for i, v in enumerate(summary)}
-            fname = f"{video}_summary.json"
-            with open(fname, "w") as fp:
+            out = {str(i): int(v) for i, v in enumerate(summary)}
+            fname = f'{video}_summary.json'
+            with open(fname, 'w') as fp:
                 json.dump(out, fp, indent=4)
-            print(f"Summary saved → {fname}")
+            print(f'Summary saved → {fname}')
 
-    mean_fscore   = float(np.nanmean(video_fscores))
-    mean_kendall  = float(np.nanmean(video_kendalls))
+    mean_fscore = float(np.nanmean(video_fscores))
+    mean_kendall = float(np.nanmean(video_kendalls))
     mean_spearman = float(np.nanmean(video_spearmans))
 
-    if summe:
+    if is_summe:
         return mean_fscore, mean_kendall, mean_spearman, video_summaries, video_names
     return mean_fscore, mean_kendall, mean_spearman, video_summaries
 
-def _scan_split_worker(args: tuple):
+
+def _scan_split_worker(args: tuple) -> Tuple[int, int, Dict]:
     (split_id, model_path, epoch_files,
      dataset_path, test_keys,
      eval_metric, dataset, model_kwargs, verbose) = args
@@ -178,9 +183,8 @@ def _scan_split_worker(args: tuple):
     results: Dict[int, Tuple[float, float, float]] = {}
 
     for fname in epoch_files:
-        epoch_num = int(re.findall(r"\d+", fname)[0])
-        model     = _load_model(model_path, fname, model_kwargs)
-
+        epoch_num = int(re.findall(r'\d+', fname)[0])
+        model = _load_model(model_path, fname, model_kwargs)
         fs, kt, sp, *_ = run_inference(
             model, dataset_path, test_keys,
             eval_metric, save_summary=False,
@@ -191,13 +195,14 @@ def _scan_split_worker(args: tuple):
     best_epoch = max(results, key=lambda e: results[e][0])
     return split_id, best_epoch, results
 
+
 def _run_full_scan_parallel(
     split_ids: List[int],
     split_configs: dict,
     n_workers: int,
-) -> dict:
+) -> Dict:
     n_workers = min(n_workers, len(split_ids))
-    print(f"Full scan: {n_workers} parallel thread(s) across {len(split_ids)} splits\n")
+    print(f'Full scan: {n_workers} parallel thread(s) across {len(split_ids)} splits\n')
 
     output: Dict = {}
 
@@ -212,50 +217,48 @@ def _run_full_scan_parallel(
                 sid, best_epoch, results = future.result()
                 output[sid] = (best_epoch, results)
                 best_fs = results[best_epoch][0]
-                print(
-                    f"  Split {sid} done — best epoch: {best_epoch} "
-                    f"(F1={best_fs:.2f}%)"
-                )
+                print(f'  Split {sid} done — best epoch: {best_epoch} (F1={best_fs:.2f}%)')
             except Exception as exc:
-                logging.error(f"  Split {split_id} failed: {exc}", exc_info=True)
+                logging.error(f'  Split {split_id} failed: {exc}', exc_info=True)
 
     return output
 
+
 def _print_results(
-    split_ids, best_epochs, split_results,
-    best_avg_epoch, avg_fs, avg_ks, avg_ss,
-):
-    """Print a clean summary table to stdout."""
-    sep = "-" * 62
-    print(f"\n{sep}")
-    print(
-        f"{'Split':<8} {'Epoch':>6}  {'F1 (%)':>8}  "
-        f"{'Kendall τ':>10}  {'Spearman ρ':>11}"
-    )
+    split_ids: List[int],
+    best_epochs: Dict,
+    split_results: Dict,
+    best_avg_epoch: int,
+    avg_fs: Dict,
+    avg_ks: Dict,
+    avg_ss: Dict,
+) -> None:
+    sep = '-' * 62
+    print(f'\n{sep}')
+    print(f"{'Split':<8} {'Epoch':>6}  {'F1 (%)':>8}  {'Kendall τ':>10}  {'Spearman ρ':>11}")
     print(sep)
     for s in split_ids:
         if s not in best_epochs:
             continue
-        ep       = best_epochs[s]
+        ep = best_epochs[s]
         fs, kt, sp = split_results[s]
-        print(f"  {s:<6} {ep:>6}  {fs:>8.2f}  {kt:>10.4f}  {sp:>11.4f}")
+        print(f'  {s:<6} {ep:>6}  {fs:>8.2f}  {kt:>10.4f}  {sp:>11.4f}')
     print(sep)
     print(
         f"  {'AVG':<6} {best_avg_epoch:>6}  "
-        f"{avg_fs[best_avg_epoch]:>8.2f}  "
-        f"{avg_ks[best_avg_epoch]:>10.4f}  "
-        f"{avg_ss[best_avg_epoch]:>11.4f}"
+        f'{avg_fs[best_avg_epoch]:>8.2f}  '
+        f'{avg_ks[best_avg_epoch]:>10.4f}  '
+        f'{avg_ss[best_avg_epoch]:>11.4f}'
     )
-    print(f"{sep}\n")
+    print(f'{sep}\n')
 
-def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str):
+
+def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str) -> None:
     all_epochs = sorted({
-        ep
-        for s in split_ids
-        for ep in all_epoch_results.get(s, {})
+        ep for s in split_ids for ep in all_epoch_results.get(s, {})
     })
 
-    rows   = {"Epoch": all_epochs}
+    rows: Dict = {'Epoch': all_epochs}
     avg_fs: Dict[int, float] = {}
     avg_ks: Dict[int, float] = {}
     avg_ss: Dict[int, float] = {}
@@ -264,117 +267,106 @@ def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str):
         vf = [all_epoch_results[s][ep][0] for s in split_ids if ep in all_epoch_results.get(s, {})]
         vk = [all_epoch_results[s][ep][1] for s in split_ids if ep in all_epoch_results.get(s, {})]
         vs = [all_epoch_results[s][ep][2] for s in split_ids if ep in all_epoch_results.get(s, {})]
-        avg_fs[ep] = float(np.nanmean(vf)) if vf else float("nan")
-        avg_ks[ep] = float(np.nanmean(vk)) if vk else float("nan")
-        avg_ss[ep] = float(np.nanmean(vs)) if vs else float("nan")
+        avg_fs[ep] = float(np.nanmean(vf)) if vf else float('nan')
+        avg_ks[ep] = float(np.nanmean(vk)) if vk else float('nan')
+        avg_ss[ep] = float(np.nanmean(vs)) if vs else float('nan')
 
     for s in split_ids:
         er = all_epoch_results.get(s, {})
-        rows[f"F-score Split {s}"]  = [er.get(ep, (None,))[0]           for ep in all_epochs]
-        rows[f"Kendall Split {s}"]  = [er.get(ep, (None, None))[1]      for ep in all_epochs]
-        rows[f"Spearman Split {s}"] = [er.get(ep, (None, None, None))[2] for ep in all_epochs]
+        rows[f'F-score Split {s}'] = [er.get(ep, (None,))[0] for ep in all_epochs]
+        rows[f'Kendall Split {s}'] = [er.get(ep, (None, None))[1] for ep in all_epochs]
+        rows[f'Spearman Split {s}'] = [er.get(ep, (None, None, None))[2] for ep in all_epochs]
 
-    rows["Avg F-score"]  = [avg_fs[ep] for ep in all_epochs]
-    rows["Avg Kendall"]  = [avg_ks[ep] for ep in all_epochs]
-    rows["Avg Spearman"] = [avg_ss[ep] for ep in all_epochs]
+    rows['Avg F-score'] = [avg_fs[ep] for ep in all_epochs]
+    rows['Avg Kendall'] = [avg_ks[ep] for ep in all_epochs]
+    rows['Avg Spearman'] = [avg_ss[ep] for ep in all_epochs]
 
-    df = pd.DataFrame(rows).set_index("Epoch")
+    df = pd.DataFrame(rows).set_index('Epoch')
 
     tuples = []
     for s in split_ids:
-        for m in ("F-score", "Kendall", "Spearman"):
-            tuples.append((f"Split {s}", m))
-    for m in ("F-score", "Kendall", "Spearman"):
-        tuples.append(("Average", m))
+        for m in ('F-score', 'Kendall', 'Spearman'):
+            tuples.append((f'Split {s}', m))
+    for m in ('F-score', 'Kendall', 'Spearman'):
+        tuples.append(('Average', m))
     df.columns = pd.MultiIndex.from_tuples(tuples)
 
-    xlsx_path = f"{dataset}_epoch_metrics.xlsx"
+    xlsx_path = f'{dataset}_epoch_metrics.xlsx'
     df.to_excel(xlsx_path)
 
     wb = load_workbook(xlsx_path)
     ws = wb.active
-    ws.merge_cells("A1:A2")
-    cell        = ws["A1"]
-    cell.value  = "Epoch"
-    cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells('A1:A2')
+    cell = ws['A1']
+    cell.value = 'Epoch'
+    cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.delete_rows(3, 1)
     wb.save(xlsx_path)
 
-    print(f"Full epoch metrics saved → {xlsx_path}")
+    print(f'Full epoch metrics saved → {xlsx_path}')
 
-def main():
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run inference and report best-epoch results for each split."
+        description='Run inference and report best-epoch results for each split.'
     )
-    parser.add_argument("--dataset",       type=str,   default="SumMe",
-                        help="Dataset [SumMe | TVSum | MrHiSum]")
-    parser.add_argument("--model_version", type=str,   default="",
-                        help="Model version suffix, e.g. 'v2'")
-    parser.add_argument("--verbose",       type=int,   default=0,
-                        help="Per-video log (0=off, 1=on)")
-    parser.add_argument("--save_summary",  type=int,   default=0,
-                        help="Export binary summary JSON per video (0=off, 1=on)")
-    parser.add_argument("--save_results",  type=int,   default=0,
-                        help="Full epoch scan + save xlsx (0=off, 1=on)")
-    parser.add_argument("--workers",       type=int,   default=5,
-                        help="Parallel worker threads for full scan "
-                             "(--save_results=1 only). Default=5 (one per split). "
-                             "Set to 1 to disable parallelism.")
-    parser.add_argument("--hidden_dim",    type=int,   default=512)
-    parser.add_argument("--num_layers",    type=int,   default=2)
-    parser.add_argument("--dropout",       type=float, default=0.5,
-                        help="Must match the value used during training.")
+    parser.add_argument('--dataset', type=str, default='SumMe')
+    parser.add_argument('--model_version', type=str, default='')
+    parser.add_argument('--verbose', type=int, default=0)
+    parser.add_argument('--save_summary', type=int, default=0)
+    parser.add_argument('--save_results', type=int, default=0)
+    parser.add_argument('--workers', type=int, default=5)
+    parser.add_argument('--hidden_dim', type=int, default=512)
+    parser.add_argument('--num_layers', type=int, default=2)
+    parser.add_argument('--dropout', type=float, default=0.5)
 
     args = vars(parser.parse_args())
 
-    dataset       = args["dataset"]
-    model_version = args["model_version"]
-    verbose       = bool(args["verbose"])
-    save_summary  = bool(args["save_summary"])
-    save_results  = bool(args["save_results"])
-    n_workers     = args["workers"]
+    dataset = args['dataset']
+    model_version = args['model_version']
+    verbose = bool(args['verbose'])
+    save_summary = bool(args['save_summary'])
+    save_results = bool(args['save_results'])
+    n_workers = args['workers']
 
-    eval_metric = "avg" if dataset.lower() == "tvsum" else "max"
-    split_ids   = list(range(5)) if dataset.lower() in ("summe", "tvsum") else [0]
+    eval_metric = 'avg' if dataset.lower() == 'tvsum' else 'max'
+    split_ids = list(range(5)) if dataset.lower() in ('summe', 'tvsum') else [0]
 
     model_kwargs = dict(
         input_size=1024,
         output_size=1024,
         num_segments=4,
-        hidden_dim=args["hidden_dim"],
-        num_layers=args["num_layers"],
-        dropout=args["dropout"],
+        hidden_dim=args['hidden_dim'],
+        num_layers=args['num_layers'],
+        dropout=args['dropout'],
     )
 
-    paths        = get_paths(dataset)
-    dataset_path = paths["dataset"]
-    split_file   = paths["split"]
+    paths = get_paths(dataset)
+    dataset_path = paths['dataset']
+    split_file = paths['split']
 
     with open(split_file) as fp:
         split_data = json.load(fp)
 
-    print(f"\nDataset: {dataset}  |  eval: {eval_metric}  |  splits: {split_ids}"
-          f"  |  device: {DEVICE}")
+    print(f'\nDataset: {dataset}  |  eval: {eval_metric}  |  splits: {split_ids}  |  device: {DEVICE}')
+
+    best_epochs: Dict = {}
+    split_results: Dict = {}
+    all_epoch_results: Dict = {}
 
     if save_results:
         split_configs: Dict = {}
         for split_id in split_ids:
-            model_path = (
-                f"Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}"
-            )
+            model_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
             test_keys = (
-                split_data[split_id]["test_keys"]
+                split_data[split_id]['test_keys']
                 if isinstance(split_data, list)
-                else split_data["test_keys"]
+                else split_data['test_keys']
             )
             epoch_files = _find_epoch_files(model_path)
-
             if not epoch_files:
-                logging.warning(
-                    f"No epoch files in {model_path} — skipping split {split_id}"
-                )
+                logging.warning(f'No epoch files in {model_path} — skipping split {split_id}')
                 continue
-
             split_configs[split_id] = (
                 split_id, model_path, epoch_files,
                 dataset_path, test_keys,
@@ -382,71 +374,49 @@ def main():
             )
 
         if not split_configs:
-            print("No valid splits found. Check model paths.")
+            print('No valid splits found. Check model paths.')
             return
 
-        scan_output = _run_full_scan_parallel(
-            list(split_configs.keys()), split_configs, n_workers
-        )
-
-        best_epochs:        Dict = {}
-        split_results:      Dict = {}
-        all_epoch_results:  Dict = {}
+        scan_output = _run_full_scan_parallel(list(split_configs.keys()), split_configs, n_workers)
 
         for sid, (best_epoch, results) in scan_output.items():
-            best_epochs[sid]       = best_epoch
-            split_results[sid]     = results[best_epoch]
+            best_epochs[sid] = best_epoch
+            split_results[sid] = results[best_epoch]
             all_epoch_results[sid] = results
 
     else:
-        best_epochs: Dict = {}
-        split_results: Dict = {}
-
         for split_id in split_ids:
-            model_path = (
-                f"Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}"
-            )
+            model_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
             test_keys = (
-                split_data[split_id]["test_keys"]
+                split_data[split_id]['test_keys']
                 if isinstance(split_data, list)
-                else split_data["test_keys"]
+                else split_data['test_keys']
             )
             epoch_files = _find_epoch_files(model_path)
-
             if not epoch_files:
-                logging.warning(
-                    f"No epoch files in {model_path} — skipping split {split_id}"
-                )
+                logging.warning(f'No epoch files in {model_path} — skipping split {split_id}')
                 continue
 
             best_epoch = _load_best_epoch_from_fscores(model_path)
-
             if best_epoch is not None:
-                best_pkl = join(model_path, "best_model.pkl")
-                fname    = (
-                    "best_model.pkl"
-                    if os.path.exists(best_pkl)
-                    else f"epoch-{best_epoch}.pkl"
-                )
-                print(f"Split {split_id}: epoch {best_epoch} (from f_scores.txt)")
+                best_pkl = join(model_path, 'best_model.pkl')
+                fname = 'best_model.pkl' if os.path.exists(best_pkl) else f'epoch-{best_epoch}.pkl'
+                print(f'Split {split_id}: epoch {best_epoch} (from f_scores.txt)')
             else:
-                fname      = epoch_files[-1]
-                best_epoch = int(re.findall(r"\d+", fname)[0])
-                print(
-                    f"Split {split_id}: f_scores.txt not found — "
-                    f"using last epoch ({best_epoch})"
-                )
+                fname = epoch_files[-1]
+                best_epoch = int(re.findall(r'\d+', fname)[0])
+                print(f'Split {split_id}: f_scores.txt not found — using last epoch ({best_epoch})')
 
             model = _load_model(model_path, fname, model_kwargs)
             fs, kt, sp, *_ = run_inference(
                 model, dataset_path, test_keys,
                 eval_metric, save_summary, dataset, verbose,
             )
-            best_epochs[split_id]   = best_epoch
+            best_epochs[split_id] = best_epoch
             split_results[split_id] = (fs, kt, sp)
 
     if not split_results:
-        print("No results collected — check model paths and split files.")
+        print('No results collected — check model paths and split files.')
         return
 
     valid_splits = list(split_results.keys())
@@ -459,14 +429,11 @@ def main():
     avg_ks = {best_avg_epoch: float(np.nanmean(all_k))}
     avg_ss = {best_avg_epoch: float(np.nanmean(all_s))}
 
-    _print_results(
-        valid_splits, best_epochs, split_results,
-        best_avg_epoch, avg_fs, avg_ks, avg_ss,
-    )
+    _print_results(valid_splits, best_epochs, split_results, best_avg_epoch, avg_fs, avg_ks, avg_ss)
 
     if save_results:
         _save_xlsx(valid_splits, all_epoch_results, dataset)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

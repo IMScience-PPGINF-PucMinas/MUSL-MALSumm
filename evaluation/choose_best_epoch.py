@@ -1,87 +1,79 @@
-# -*- coding: utf-8 -*-
-import torch
-import numpy as np
 import csv
 import json
 import sys
+from typing import List
 
-# with args (example usage: python choose_best_epoch.py <path_to_experiment> TVSum)
-exp_path = sys.argv[1]
-dataset = sys.argv[2]
-''' without args
-exp_path = "../PGL-SUM/Summaries/PGL-SUM/exp1"
-dataset = "SumMe"
-'''
+import numpy as np
+import torch
 
 
-def train_logs(log_file):
-    """
-    Choose and return the epoch based on the training loss. The criterion is based on the smoothness of the loss changes
-    (1st derivative). Calculate the -percentage wise- difference to get to the global min. Similarly for the first local
-    min. Finally, choose the smaller one (by absolute value).
-    The intuition behind that criterion is to check if the dataset can handle steep changes.
-    :param str log_file: Path to the saved csv file containing the loss information.
-    :return: The epoch of the best model.
-    """
-    losses = {}
-    losses_names = []
+def _read_loss_from_csv(log_file: str) -> List[float]:
+    losses: dict = {}
+    names: List[str] = []
 
-    # Read the csv file with the training losses
-    with open(log_file) as csv_file:
-        csv_reader = csv.reader(csv_file, delimiter=',')
-        for (i, row) in enumerate(csv_reader):
+    with open(log_file) as f:
+        reader = csv.reader(f, delimiter=',')
+        for i, row in enumerate(reader):
             if i == 0:
-                for col in range(len(row)):
-                    losses[row[col]] = []
-                    losses_names.append(row[col])
+                names = row
+                losses = {name: [] for name in names}
             else:
-                for col in range(len(row)):
-                    losses[losses_names[col]].append(float(row[col]))
+                for col, name in enumerate(names):
+                    losses[name].append(float(row[col]))
 
-    # criterion: MSE loss of gtscores
-    loss = losses["loss_epoch"]
+    return losses['loss_epoch']
+
+
+def choose_best_epoch(log_file: str) -> int:
+    loss = _read_loss_from_csv(log_file)
 
     START_EPOCH, tol = 15, 1
-    cand_epoch, cand_val = 0, 0
-    for i in range(START_EPOCH, len(loss)-1):
-        diff = (loss[i+1]-loss[i])/loss[i+1] * 100
+    cand_epoch, cand_val = 0, 0.0
+
+    for i in range(START_EPOCH, len(loss) - 1):
+        diff = (loss[i + 1] - loss[i]) / loss[i + 1] * 100
         if diff <= -tol:
-            cand_epoch = i+1  # take the next epoch from that good (negative) change in the loss curve
+            cand_epoch = i + 1
             cand_val = diff
             break
         if diff >= tol:
-            cand_epoch = i    # take the previous epoch from that bad (positive) change in the loss curve
+            cand_epoch = i
             cand_val = diff
             break
 
-    # Find the absolute minimum
     criterion = torch.tensor(loss)
-    argmin_epoch = torch.argmin(criterion).item()
-    argmin_diff = (loss[argmin_epoch]-loss[argmin_epoch-1])/loss[argmin_epoch] * 100
+    argmin_epoch = int(torch.argmin(criterion).item())
+    argmin_diff = (loss[argmin_epoch] - loss[argmin_epoch - 1]) / loss[argmin_epoch] * 100
 
-    if abs(argmin_diff) < abs(cand_val):
-        epoch = argmin_epoch
-    else:
-        epoch = cand_epoch
-    return epoch+1
+    epoch = argmin_epoch if abs(argmin_diff) < abs(cand_val) else cand_epoch
+    return epoch + 1
 
 
-all_fscores = np.zeros(5, dtype=float)
-for split in range(0, 5):
-    results_file = exp_path + "/" + dataset + "/results/split" + str(split) + "/f_scores.txt"
-    log = exp_path + "/" + dataset + "/logs/split" + str(split) + "/scalars.csv"
+def main(exp_path: str, dataset: str) -> None:
+    all_fscores = np.zeros(5, dtype=float)
 
-    # read F-Scores
-    with open(results_file) as f:
-        f_scores = f.read().strip()
-        if "\n" in f_scores:
-            f_scores = f_scores.splitlines()
-        else:
-            f_scores = json.loads(f_scores)
-        f_scores = [float(f_score) for f_score in f_scores]
-        selected_epoch = train_logs(log)
-        all_fscores[split] = np.round(f_scores[selected_epoch], 2)
-        print(f"Split: {split} -> Criterion Fscore: {all_fscores[split]} @ epoch: {selected_epoch}")
+    for split in range(5):
+        results_file = f'{exp_path}/{dataset}/results/split{split}/f_scores.txt'
+        log_file = f'{exp_path}/{dataset}/logs/split{split}/scalars.csv'
 
-avg_fscore = np.mean(all_fscores)
-print(f"Average Fscore: {avg_fscore}")
+        with open(results_file) as f:
+            content = f.read().strip()
+        f_scores = (
+            json.loads(content)
+            if not '\n' in content
+            else [float(x) for x in content.splitlines()]
+        )
+        f_scores = [float(x) for x in f_scores]
+
+        selected_epoch = choose_best_epoch(log_file)
+        all_fscores[split] = round(f_scores[selected_epoch], 2)
+        print(f'Split: {split} -> Criterion Fscore: {all_fscores[split]} @ epoch: {selected_epoch}')
+
+    print(f'Average Fscore: {np.mean(all_fscores):.4f}')
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print('Usage: python choose_best_epoch.py <exp_path> <dataset>')
+        sys.exit(1)
+    main(sys.argv[1], sys.argv[2])

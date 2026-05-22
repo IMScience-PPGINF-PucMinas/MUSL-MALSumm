@@ -1,184 +1,145 @@
-# -*- coding: utf-8 -*-
-# author: Anders Krogh Mortensen (GitHub: @anderskm)
-# link: https://github.com/anderskm/exportTensorFlowLog/blob/master/exportTensorFlowLog.py
-import tensorflow as tf
-import time
 import csv
-import sys
 import os
+import sys
+import time
+
 try:
-    import collections.abc as collections
+    import collections.abc
 except ImportError:
     import collections
 
-# Import the event accumulator from Tensorboard. Location varies between Tensorflow versions.
-# Try each known location until one works.
-eventAccumulatorImported = False
+_event_accumulator = None
 
-# TF version < 1.1.0
-if not eventAccumulatorImported:
+for _import in [
+    'tensorflow.python.summary',
+    'tensorflow.tensorboard.backend.event_processing',
+    'tensorboard.backend.event_processing',
+]:
     try:
-        from tensorflow.python.summary import event_accumulator
-        eventAccumulatorImported = True
+        import importlib
+        _mod = importlib.import_module(f'{_import}.event_accumulator')
+        _event_accumulator = _mod.event_accumulator
+        break
     except ImportError:
-        eventAccumulatorImported = False
+        continue
 
-# TF version = 1.1.0
-if not eventAccumulatorImported:
-    try:
-        from tensorflow.tensorboard.backend.event_processing import event_accumulator
-        eventAccumulatorImported = True
-    except ImportError:
-        eventAccumulatorImported = False
-
-# TF version >= 1.3.0
-if not eventAccumulatorImported:
-    try:
-        from tensorboard.backend.event_processing import event_accumulator
-        eventAccumulatorImported = True
-    except ImportError:
-        eventAccumulatorImported = False
-
-# TF version = Unknown
-if not eventAccumulatorImported:
+if _event_accumulator is None:
     raise ImportError('Could not locate and import Tensorflow event accumulator.')
 
-summariesDefault = ['scalars']  # ['scalars', 'histograms', 'images', 'audio', 'compressedHistograms']
+event_accumulator = _event_accumulator
+
+SUMMARIES_DEFAULT = ['scalars']
 
 
-class Timer(object):
-    # link: https://stackoverflow.com/a/5849861
+class Timer:
     def __init__(self, name=None):
         self.name = name
+        self.tStart = None
 
     def __enter__(self):
         self.tStart = time.time()
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         if self.name:
-            print('[%s]' % self.name)
-            print('Elapsed: %s' % (time.time() - self.tStart))
+            print(f'[{self.name}]')
+        print(f'Elapsed: {time.time() - self.tStart:.4f}s')
 
 
-def exitWithUsage():
-    print(' ')
-    print('Usage:')
-    print('   python readLogs.py <output-folder> <output-path-to-csv> <summaries>')
-    print('Inputs:')
+def _exit_with_usage() -> None:
+    print('\nUsage:')
+    print('   python exportTensorFlowLog.py <input-path-to-logfile> <output-folder> [<summaries>]')
+    print('\nInputs:')
     print('   <input-path-to-logfile>  - Path to TensorFlow logfile.')
     print('   <output-folder>          - Path to output folder.')
     print(
-        '   <summaries>              - (Optional) Comma separated list of summaries to save in output-folder. Default: '
-        + ', '.join(summariesDefault))
-    print(' ')
-    sys.exit()
+        '   <summaries>              - (Optional) Comma-separated list of summaries. '
+        f'Default: {", ".join(SUMMARIES_DEFAULT)}'
+    )
+    sys.exit(1)
 
 
-if len(sys.argv) < 3:
-    exitWithUsage()
+def _parse_args():
+    if len(sys.argv) < 3:
+        _exit_with_usage()
 
-inputLogFile = sys.argv[1]
-outputFolder = sys.argv[2]
+    input_log = sys.argv[1]
+    output_folder = sys.argv[2]
+    summaries = (
+        SUMMARIES_DEFAULT
+        if len(sys.argv) < 4 or sys.argv[3] == 'all'
+        else sys.argv[3].split(',')
+    )
 
-if len(sys.argv) < 4:
-    summaries = summariesDefault
-else:
-    if sys.argv[3] == 'all':
-        summaries = summariesDefault
-    else:
-        summaries = sys.argv[3].split(',')
+    if any(s not in SUMMARIES_DEFAULT for s in summaries):
+        print('Unknown summary! See usage for acceptable summaries.')
+        _exit_with_usage()
 
-if any(x not in summariesDefault for x in summaries):
-    print('Unknown summary! See usage for acceptable summaries.')
-    exitWithUsage()
+    return input_log, output_folder, summaries
 
-# Setting up event accumulator...
-with Timer():
-    ea = event_accumulator.EventAccumulator(inputLogFile,
-                                            size_guidance={
-                                                event_accumulator.COMPRESSED_HISTOGRAMS: 0,  # 0 = grab all
-                                                event_accumulator.IMAGES: 0,
-                                                event_accumulator.AUDIO: 0,
-                                                event_accumulator.SCALARS: 0,
-                                                event_accumulator.HISTOGRAMS: 0,
-                                            })
 
-# Loading events from file...
-with Timer():
-    ea.Reload()  # loads events from file
+def export_scalars(ea, output_folder: str, tags: dict) -> None:
+    csv_path = os.path.join(output_folder, 'scalars.csv')
+    print(f'CSV-path: {csv_path}')
+    scalar_tags = tags['scalars']
 
-tags = ea.Tags()
-''' Uncomment for logging
-print(' ')
-print('Log summary:')
-for t in tags:
-    tagSum = []
-    if isinstance(tags[t], collections.Sequence):
-        tagSum = str(len(tags[t])) + ' summaries'
-    else:
-        tagSum = str(tags[t])
-    print('   ' + t + ': ' + tagSum)
-'''
-
-if not os.path.isdir(outputFolder):
-    os.makedirs(outputFolder)
-
-if 'audio' in summaries:
-    print(' ')
-    print('Exporting audio...')
     with Timer():
-        print('   Audio is not yet supported!')
+        with open(csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            writer.writerow(['wall_time', 'step'] + scalar_tags)
 
-if 'compressedHistograms' in summaries:
-    print(' ')
-    print('Exporting compressedHistograms...')
-    with Timer():
-        print('   Compressed histograms are not yet supported!')
+            base_vals = ea.Scalars(scalar_tags[0])
+            for i in range(len(base_vals)):
+                v = base_vals[i]
+                row = [v.wall_time, v.step]
+                for tag in scalar_tags:
+                    row.append(ea.Scalars(tag)[i].value)
+                writer.writerow(row)
 
-if 'histograms' in summaries:
-    print(' ')
-    print('Exporting histograms...')
-    with Timer():
-        print('   Histograms are not yet supported!')
 
-if 'images' in summaries:
-    print(' ')
-    print('Exporting images...')
-    imageDir = outputFolder + 'images'
-    print('Image dir: ' + imageDir)
+def export_images(ea, output_folder: str, tags: dict) -> None:
+    image_dir = os.path.join(output_folder, 'images')
+    print(f'Image dir: {image_dir}')
     with Timer():
-        imageTags = tags['images']
-        for imageTag in imageTags:
-            images = ea.Images(imageTag)
-            imageTagDir = imageDir + '/' + imageTag
-            if not os.path.isdir(imageTagDir):
-                os.makedirs(imageTagDir)
-            for image in images:
-                imageFilename = imageTagDir + '/' + str(image.step) + '.png'
-                with open(imageFilename, 'wb') as f:
+        for image_tag in tags['images']:
+            tag_dir = os.path.join(image_dir, image_tag)
+            os.makedirs(tag_dir, exist_ok=True)
+            for image in ea.Images(image_tag):
+                img_path = os.path.join(tag_dir, f'{image.step}.png')
+                with open(img_path, 'wb') as f:
                     f.write(image.encoded_image_string)
 
-if 'scalars' in summaries:
-    csvFileName = os.path.join(outputFolder, 'scalars.csv')
-    # Exporting scalars to csv-file...
-    print('CSV-path: ' + csvFileName)
-    scalarTags = tags['scalars']
+
+def main() -> None:
+    input_log, output_folder, summaries = _parse_args()
+
     with Timer():
-        with open(csvFileName, 'w') as csvfile:
-            logWriter = csv.writer(csvfile, delimiter=',')
+        ea = event_accumulator.EventAccumulator(
+            input_log,
+            size_guidance={
+                event_accumulator.COMPRESSED_HISTOGRAMS: 0,
+                event_accumulator.IMAGES: 0,
+                event_accumulator.AUDIO: 0,
+                event_accumulator.SCALARS: 0,
+                event_accumulator.HISTOGRAMS: 0,
+            },
+        )
 
-            # Write headers to columns
-            headers = ['wall_time', 'step']
-            for s in scalarTags:
-                headers.append(s)
-            logWriter.writerow(headers)
+    with Timer():
+        ea.Reload()
 
-            vals = ea.Scalars(scalarTags[0])
-            for i in range(len(vals)):
-                v = vals[i]
-                data = [v.wall_time, v.step]
-                for s in scalarTags:
-                    scalarTag = ea.Scalars(s)
-                    S = scalarTag[i]
-                    data.append(S.value)
-                logWriter.writerow(data)
+    tags = ea.Tags()
+    os.makedirs(output_folder, exist_ok=True)
+
+    if 'scalars' in summaries:
+        export_scalars(ea, output_folder, tags)
+
+    if 'images' in summaries:
+        export_images(ea, output_folder, tags)
+
+    for unsupported in ('audio', 'compressedHistograms', 'histograms'):
+        if unsupported in summaries:
+            print(f'\n{unsupported} export is not yet supported.')
+
+
+if __name__ == '__main__':
+    main()

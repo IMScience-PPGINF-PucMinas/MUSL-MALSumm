@@ -1,68 +1,69 @@
-# -*- coding: utf-8 -*-
-from os import listdir
+import argparse
 import json
-import numpy as np
+from os import listdir
+from typing import List
+
 import h5py
+import numpy as np
+
 from .evaluation_metrics import evaluate_summary
 from inference.generate_summary import generate_summary
-import argparse
 
-# arguments to run the script
-parser = argparse.ArgumentParser()
-parser.add_argument("--path", type=str,
-                    default='../Summaries/SumMe/results/split0',
-                    help="Path to the json files with the scores of the frames for each epoch")
-parser.add_argument("--dataset", type=str, default='SumMe', help="Dataset to be used")
-parser.add_argument("--eval", type=str, default="max", help="Eval method to be used for f_score reduction (max or avg)")
 
-args = vars(parser.parse_args())
-path = args["path"]
-dataset = args["dataset"]
-eval_method = args["eval"]
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--path', type=str, default='../Summaries/SumMe/results/split0')
+    parser.add_argument('--dataset', type=str, default='SumMe')
+    parser.add_argument('--eval', type=str, default='max', choices=['max', 'avg'])
+    return parser.parse_args()
 
-results = [f for f in listdir(path) if f.endswith(".json")]
-results.sort(key=lambda video: int(video[6:-5]))
-dataset_path = '../data/datasets/' + dataset + '/eccv16_dataset_' + dataset.lower() + '_google_pool5.h5'
 
-f_score_epochs = []
-for epoch in results:                       # for each epoch ...
-    all_scores = []
-    with open(path + '/' + epoch) as f:     # read the json file ...
-        data = json.loads(f.read())
+def compute_fscores(path: str, dataset: str, eval_method: str) -> None:
+    dataset_path = (
+        f'../data/datasets/{dataset}/eccv16_dataset_{dataset.lower()}_google_pool5.h5'
+    )
+
+    result_files = sorted(
+        [f for f in listdir(path) if f.endswith('.json')],
+        key=lambda x: int(x[6:-5]),
+    )
+
+    f_score_epochs: List[float] = []
+
+    for epoch_file in result_files:
+        with open(f'{path}/{epoch_file}') as f:
+            data = json.load(f)
         keys = list(data.keys())
+        all_scores = [np.asarray(data[k]) for k in keys]
 
-        for video_name in keys:             # for each video inside that json file ...
-            scores = np.asarray(data[video_name])  # read the importance scores from frames
-            all_scores.append(scores)
+        all_user_summary: List[np.ndarray] = []
+        all_shot_bound: List[np.ndarray] = []
+        all_nframes: List[int] = []
+        all_positions: List[np.ndarray] = []
 
-    all_user_summary, all_shot_bound, all_nframes, all_positions = [], [], [], []
-    with h5py.File(dataset_path, 'r') as hdf:
-        for video_name in keys:
-            video_index = video_name[6:]
+        with h5py.File(dataset_path, 'r') as hdf:
+            for video_name in keys:
+                video_index = video_name[6:]
+                all_user_summary.append(np.array(hdf[f'video_{video_index}/user_summary']))
+                all_shot_bound.append(np.array(hdf[f'video_{video_index}/change_points']))
+                all_nframes.append(int(np.array(hdf[f'video_{video_index}/n_frames'])))
+                all_positions.append(np.array(hdf[f'video_{video_index}/picks']))
 
-            user_summary = np.array(hdf.get('video_' + video_index + '/user_summary'))
-            sb = np.array(hdf.get('video_' + video_index + '/change_points'))
-            n_frames = np.array(hdf.get('video_' + video_index + '/n_frames'))
-            positions = np.array(hdf.get('video_' + video_index + '/picks'))
+        all_summaries = generate_summary(all_shot_bound, all_scores, all_nframes, all_positions)
 
-            all_user_summary.append(user_summary)
-            all_shot_bound.append(sb)
-            all_nframes.append(n_frames)
-            all_positions.append(positions)
+        epoch_f_scores = [
+            evaluate_summary(all_summaries[i], all_user_summary[i], eval_method)
+            for i in range(len(all_summaries))
+        ]
 
-    all_summaries = generate_summary(all_shot_bound, all_scores, all_nframes, all_positions)
+        mean_f = float(np.mean(epoch_f_scores))
+        f_score_epochs.append(mean_f)
+        print(f'f_score: {mean_f:.4f}')
 
-    all_f_scores = []
-    # compare the resulting summary with the ground truth one, for each video
-    for video_index in range(len(all_summaries)):
-        summary = all_summaries[video_index]
-        user_summary = all_user_summary[video_index]
-        f_score = evaluate_summary(summary, user_summary, eval_method)
-        all_f_scores.append(f_score)
+    with open(f'{path}/f_scores.txt', 'w') as f:
+        json.dump(f_score_epochs, f)
 
-    f_score_epochs.append(np.mean(all_f_scores))
-    print("f_score: ", np.mean(all_f_scores))
 
-# Save the importance scores in txt format.
-with open(path + '/f_scores.txt', 'w') as outfile:
-    json.dump(f_score_epochs, outfile)
+if __name__ == '__main__':
+    args = _parse_args()
+    compute_fscores(args.path, args.dataset, args.eval)
