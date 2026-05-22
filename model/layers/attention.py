@@ -85,7 +85,7 @@ class sLSTM(nn.Module):
         c7 = self.conv7(x)
         x = torch.cat([c3, c5, c7], dim=1)
         x = self.conv_fusion(x)          # (B, conv_channels, T)
-        x = fusion + residual 
+        x = x + residual 
         x = x.permute(0, 2, 1)          # (B, T, conv_channels)
  
         T = x.size(1)
