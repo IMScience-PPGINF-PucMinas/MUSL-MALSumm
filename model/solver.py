@@ -86,16 +86,25 @@ class Solver:
 
     def train(self) -> None:
         all_samples: List[VideoRecord] = list(self.train_loader)
+        n_samples = len(all_samples)
+
+        effective_batch = min(self.config.batch_size, max(1, n_samples * 4 // 5))
+        if effective_batch != self.config.batch_size:
+            tqdm.write(
+                f'[Warning] batch_size={self.config.batch_size} exceeds fold train size. '
+                f'Using batch_size={effective_batch} instead.'
+            )
+
         kf = KFold(n_splits=5, shuffle=True, random_state=self.config.seed)
-        indices = np.arange(len(all_samples))
 
         fold_results: List[dict] = []
         global_best_fscore = -1.0
         global_best_state: Optional[dict] = None
 
-        for fold_idx, (train_idx, val_idx) in enumerate(kf.split(indices)):
+        for fold_idx, (train_idx, val_idx) in enumerate(kf.split(np.arange(n_samples))):
             print(f"\n{'='*60}")
-            print(f"  Fold {fold_idx + 1} / 5")
+            print(f"  Fold {fold_idx + 1} / 5  "
+                  f"(train={len(train_idx)}, val={len(val_idx)})")
             print(f"{'='*60}")
 
             fold_train = [all_samples[i] for i in train_idx]
@@ -112,7 +121,7 @@ class Solver:
             best_state: Optional[dict] = None
 
             for epoch_i in trange(self.config.n_epochs, desc=f'Fold {fold_idx+1} Epochs', ncols=80):
-                train_loss = self._train_one_epoch(fold_model, fold_optimizer, fold_train)
+                train_loss = self._train_one_epoch(fold_model, fold_optimizer, fold_train, effective_batch)
                 val_fscore = self._validate_fscore(fold_model, fold_val)
 
                 tqdm.write(
@@ -128,7 +137,7 @@ class Solver:
                 if val_fscore > best_fscore:
                     best_fscore = val_fscore
                     best_state = copy.deepcopy(fold_model.state_dict())
-                    self._save_checkpoint(best_state, fold_idx, epoch_i, val_fscore)
+                    self._save_checkpoint(best_state, epoch_i, val_fscore, fold_idx)
 
             fold_results.append({'fold': fold_idx + 1, 'best_val_fscore': best_fscore})
             print(f'  Best F-score for fold {fold_idx+1}: {best_fscore:.2f}%')
@@ -142,8 +151,12 @@ class Solver:
         if global_best_state is not None:
             self.model.load_state_dict(global_best_state)
             best_model_path = os.path.join(self.config.save_dir, 'best_model.pkl')
+            os.makedirs(self.config.save_dir, exist_ok=True)
             torch.save(global_best_state, best_model_path)
-            tqdm.write(f'Best model saved at {best_model_path} (F-score: {global_best_fscore:.2f}%)')
+            tqdm.write(
+                f'Best model saved at {best_model_path} '
+                f'(F-score: {global_best_fscore:.2f}%)'
+            )
 
         self.evaluate(-1)
 
@@ -152,14 +165,21 @@ class Solver:
         model: xLSTM,
         optimizer: optim.Optimizer,
         samples: List[VideoRecord],
+        batch_size: int,
     ) -> float:
         model.train()
-        loss_history: List[float] = []
-        num_batches = len(samples) // self.config.batch_size
 
-        for batch_start in range(0, num_batches * self.config.batch_size, self.config.batch_size):
+        indices = list(range(len(samples)))
+        random.shuffle(indices)
+        shuffled = [samples[i] for i in indices]
+
+        loss_history: List[float] = []
+
+        for batch_start in range(0, len(shuffled), batch_size):
+            batch = shuffled[batch_start: batch_start + batch_size]
+            if not batch:
+                continue
             optimizer.zero_grad()
-            batch = samples[batch_start: batch_start + self.config.batch_size]
             batch_loss = self._process_batch(model, batch)
             loss_history.append(batch_loss)
             torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.clip)
@@ -170,16 +190,17 @@ class Solver:
     def _process_batch(self, model: xLSTM, batch: List[VideoRecord]) -> float:
         total_loss = 0.0
         for record in batch:
-            features = record.features.to(self.config.device)
-            target = record.gtscore.to(self.config.device)
+            features = record.features.to(self.config.device)   # (T, C)
+            target = record.gtscore.to(self.config.device)      # (T,)
 
-            output, _ = model(features.squeeze(0))
-            output_adjusted = output.mean(dim=0) if output.dim() > 1 else output
-            loss = nn.MSELoss()(output_adjusted, target.squeeze(0))
+            output, _ = model(features)
+
+            min_len = min(output.shape[0], target.shape[0])
+            loss = nn.MSELoss()(output[:min_len], target[:min_len])
             loss.backward()
             total_loss += loss.item()
 
-        return total_loss / max(len(batch), 1)
+        return total_loss / len(batch)
 
     def _validate_fscore(self, model: xLSTM, samples: List[VideoRecord]) -> float:
         model.eval()
@@ -187,13 +208,14 @@ class Solver:
 
         with torch.no_grad():
             for record in samples:
-                features = record.features.to(self.config.device)
-                scores, _ = model(features.squeeze(0))
-                scores_np = (scores.squeeze(0) if scores.dim() > 1 else scores).cpu().numpy().tolist()
+                features = record.features.to(self.config.device)   # (T, C)
+
+                scores, _ = model(features)                         # (T,)
+                scores_list = scores.cpu().numpy().tolist()
 
                 summary = generate_summary(
                     [record.shot_bound],
-                    [scores_np],
+                    [scores_list],
                     [record.n_frames],
                     [record.positions],
                 )[0]
@@ -206,15 +228,17 @@ class Solver:
     def _save_checkpoint(
         self,
         state_dict: dict,
-        fold_idx: int,
         epoch_i: int,
         fscore: float,
+        fold_idx: int,
     ) -> None:
         os.makedirs(self.config.save_dir, exist_ok=True)
-        fname = f'epoch-{epoch_i}.pkl'
-        ckpt_path = os.path.join(self.config.save_dir, fname)
+        ckpt_path = os.path.join(self.config.save_dir, f'epoch-{epoch_i}.pkl')
         torch.save(state_dict, ckpt_path)
-        tqdm.write(f'Checkpoint saved: {ckpt_path}  (fold {fold_idx+1}, F-score: {fscore:.2f}%)')
+        tqdm.write(
+            f'Checkpoint saved: {ckpt_path}  '
+            f'(fold {fold_idx+1}, F-score: {fscore:.2f}%)'
+        )
 
     def _log_cross_validation_summary(self, fold_results: List[dict]) -> None:
         fscores = [r['best_val_fscore'] for r in fold_results]
@@ -248,15 +272,18 @@ class Solver:
             out_scores_dict[record.video_name] = scores
 
             if save_weights:
-                self._save_attention_weights(weights_save_path, record.video_name, epoch_i, attn_weights)
+                self._save_attention_weights(
+                    weights_save_path, record.video_name, epoch_i, attn_weights
+                )
 
         self._save_scores(out_scores_dict, epoch_i)
 
     def _evaluate_video(self, frame_features: torch.Tensor) -> Tuple[list, np.ndarray]:
+        # Accept (T, C) directly — model handles the batch dim internally
         frame_features = frame_features.view(-1, self.config.input_size).to(self.config.device)
         with torch.no_grad():
             scores, attn_weights = self.model(frame_features)
-            scores = (scores.squeeze(0) if scores.dim() > 1 else scores).cpu().numpy().tolist()
+            scores = scores.cpu().numpy().tolist()
             attn_weights = attn_weights.cpu().numpy()
         return scores, attn_weights
 
