@@ -1,5 +1,5 @@
 import json
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -28,14 +28,44 @@ _SPLIT_FILES = {
     'mrhisum': MRHISUM_SPLIT_FILE_PATH,
 }
 
+_GT_SCORE_KEY = {
+    'summe': 'user_summary',
+    'tvsum': 'user_summary',
+    'mrhisum': 'gt_summary',
+}
+
+
+class VideoRecord:
+    __slots__ = (
+        'video_name', 'features', 'gtscore',
+        'user_summary', 'shot_bound', 'n_frames', 'positions',
+    )
+
+    def __init__(
+        self,
+        video_name: str,
+        features: Tensor,
+        gtscore: Tensor,
+        user_summary: np.ndarray,
+        shot_bound: np.ndarray,
+        n_frames: int,
+        positions: np.ndarray,
+    ):
+        self.video_name = video_name
+        self.features = features
+        self.gtscore = gtscore
+        self.user_summary = user_summary
+        self.shot_bound = shot_bound
+        self.n_frames = n_frames
+        self.positions = positions
+
 
 class VideoData(Dataset):
     def __init__(self, mode: str, video_type: str, split_index: int):
         self.mode = mode
         self.name = video_type.lower()
         self.split_index = split_index
-        self.list_frame_features: List[Tensor] = []
-        self.list_gtscores: List[Tensor] = []
+        self.records: List[VideoRecord] = []
         self.split: dict = {}
 
         if self.name == 'both':
@@ -53,50 +83,60 @@ class VideoData(Dataset):
                 return split
         raise IndexError(f"split_index {self.split_index} out of range in {splits_filename}")
 
+    def _read_record(self, hdf: h5py.File, video_name: str, dataset_name: str) -> VideoRecord:
+        features = torch.tensor(
+            np.array(hdf[f'{video_name}/features']), dtype=torch.float32
+        )
+        gtscore = torch.tensor(
+            np.array(hdf[f'{video_name}/gtscore']), dtype=torch.float32
+        )
+        gt_key = _GT_SCORE_KEY.get(dataset_name, 'user_summary')
+        user_summary = np.array(hdf[f'{video_name}/{gt_key}'])
+        shot_bound = np.array(hdf[f'{video_name}/change_points'])
+
+        if dataset_name == 'mrhisum':
+            n_frames = features.shape[0]
+            positions = np.arange(n_frames, dtype=np.int32)
+        else:
+            n_frames = int(np.array(hdf[f'{video_name}/n_frames']))
+            positions = np.array(hdf[f'{video_name}/picks'], dtype=np.int32)
+
+        return VideoRecord(
+            video_name=video_name,
+            features=features,
+            gtscore=gtscore,
+            user_summary=user_summary,
+            shot_bound=shot_bound,
+            n_frames=n_frames,
+            positions=positions,
+        )
+
     def _load_single(self, name: str) -> None:
         filename = _DATASET_FILES[name]
-        splits_filename = _SPLIT_FILES[name]
-        self.split = self._load_split(splits_filename, name)
-
+        self.split = self._load_split(_SPLIT_FILES[name], name)
         with h5py.File(filename, 'r') as hdf:
             for video_name in self.split[f'{self.mode}_keys']:
-                self.list_frame_features.append(
-                    torch.tensor(np.array(hdf[f'{video_name}/features']), dtype=torch.float32)
-                )
-                self.list_gtscores.append(
-                    torch.tensor(np.array(hdf[f'{video_name}/gtscore']), dtype=torch.float32)
-                )
+                self.records.append(self._read_record(hdf, video_name, name))
 
     def _load_combined(self, dataset_names: List[str]) -> None:
-        combined_split: dict = {f'{self.mode}_keys': []}
+        combined_keys: List[str] = []
         for name in dataset_names:
-            filename = _DATASET_FILES[name]
             split = self._load_split(_SPLIT_FILES[name], name)
-            with h5py.File(filename, 'r') as hdf:
+            with h5py.File(_DATASET_FILES[name], 'r') as hdf:
                 for video_name in split[f'{self.mode}_keys']:
-                    self.list_frame_features.append(
-                        torch.tensor(np.array(hdf[f'{video_name}/features']), dtype=torch.float32)
-                    )
-                    self.list_gtscores.append(
-                        torch.tensor(np.array(hdf[f'{video_name}/gtscore']), dtype=torch.float32)
-                    )
-                    combined_split[f'{self.mode}_keys'].append(video_name)
-        self.split = combined_split
+                    self.records.append(self._read_record(hdf, video_name, name))
+                    combined_keys.append(video_name)
+        self.split = {f'{self.mode}_keys': combined_keys}
 
     def __len__(self) -> int:
-        return len(self.split[f'{self.mode}_keys'])
+        return len(self.records)
 
-    def __getitem__(self, index: int) -> Tuple[Tensor, object]:
-        video_name = self.split[f'{self.mode}_keys'][index]
-        frame_features = self.list_frame_features[index]
-        gtscore = self.list_gtscores[index]
-        if self.mode == 'test':
-            return frame_features, video_name
-        return frame_features, gtscore
+    def __getitem__(self, index: int) -> VideoRecord:
+        return self.records[index]
 
 
 def get_loader(mode: str, video_type: str, split_index: int):
     dataset = VideoData(mode, video_type, split_index)
     if mode.lower() == 'train':
-        return DataLoader(dataset, batch_size=1, shuffle=True)
+        return DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=lambda x: x[0])
     return dataset
