@@ -104,10 +104,23 @@ class mLSTM(nn.Module):
         self.fc = nn.Linear(hidden_dim, input_size)
         self.layer_norm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, x: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_ext: torch.Tensor | None = None,
+        ext_k: nn.Linear | None = None,
+        ext_v: nn.Linear | None = None,
+    ):
         out, _ = self.lstm(x)
 
-        q, k, v = self.q_proj(out), self.k_proj(out), self.v_proj(out)
+        q = self.q_proj(out)
+        if x_ext is not None and ext_k is not None and ext_v is not None:
+            k = ext_k(x_ext)
+            v = ext_v(x_ext)
+        else:
+            k = self.k_proj(out)
+            v = self.v_proj(out)
+
         scale = out.size(-1) ** 0.5
         attn_weights = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) / scale, dim=-1)
         out = out + torch.matmul(attn_weights, v)

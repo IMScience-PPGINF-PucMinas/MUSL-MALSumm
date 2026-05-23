@@ -20,7 +20,8 @@ class xLSTM(nn.Module):
         self.input_proj = nn.Conv1d(input_size, hidden_dim, kernel_size=1)
         self.slstm = sLSTM(input_size, hidden_dim, dropout=dropout)
         self.mlstm = mLSTM(input_size, hidden_dim, num_layers=num_layers, dropout=dropout)
-        self.attn_linear = nn.Linear(input_size * 2, input_size)
+        self.cross_k = nn.Linear(input_size, hidden_dim)
+        self.cross_v = nn.Linear(input_size, hidden_dim)
         self.fusion_proj = nn.Linear(input_size, hidden_dim)
         self.se_block = SEBlock(hidden_dim)
         self.temporal_refine = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1, groups=hidden_dim)
@@ -47,12 +48,14 @@ class xLSTM(nn.Module):
         residual = self.input_proj(x.permute(0, 2, 1)).permute(0, 2, 1)
 
         x_slstm = self.slstm(x)
-        x_mlstm, attn_weights = self.mlstm(x)
+        x_mlstm, attn_weights = self.mlstm(
+            x,
+            x_ext=x_slstm,
+            ext_k=self.cross_k,
+            ext_v=self.cross_v,
+        )
 
-        gate = torch.sigmoid(self.attn_linear(torch.cat([x_slstm, x_mlstm], dim=-1)))
-        x_combined = gate * x_slstm + (1.0 - gate) * x_mlstm
-
-        x_combined = self.fusion_proj(x_combined) + residual
+        x_combined = self.fusion_proj(x_mlstm) + residual
 
         x_ref = self.temporal_refine(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
         x_combined = self.norm(x_combined + x_ref)
