@@ -119,6 +119,7 @@ class Solver:
 
             best_fscore = -1.0
             best_state: Optional[dict] = None
+            epoch_history: List[dict] = []
 
             for epoch_i in trange(self.config.n_epochs, desc=f'Fold {fold_idx+1} Epochs', ncols=80):
                 train_loss = self._train_one_epoch(fold_model, fold_optimizer, fold_train, effective_batch)
@@ -128,6 +129,12 @@ class Solver:
                     f'[Fold {fold_idx+1}] Epoch {epoch_i:03d} | '
                     f'Train Loss: {train_loss:.4f} | Val F-score: {val_fscore:.2f}%'
                 )
+
+                epoch_history.append({
+                    'epoch': epoch_i,
+                    'train_loss': round(float(train_loss), 6),
+                    'val_fscore': round(float(val_fscore), 4),
+                })
 
                 step = epoch_i + fold_idx * self.config.n_epochs
                 if self.writer is not None:
@@ -139,7 +146,11 @@ class Solver:
                     best_state = copy.deepcopy(fold_model.state_dict())
                     self._save_checkpoint(best_state, epoch_i, val_fscore, fold_idx)
 
-            fold_results.append({'fold': fold_idx + 1, 'best_val_fscore': best_fscore})
+            fold_results.append({
+                'fold': fold_idx + 1,
+                'best_val_fscore': best_fscore,
+                'epoch_history': epoch_history,
+            })
             print(f'  Best F-score for fold {fold_idx+1}: {best_fscore:.2f}%')
 
             if best_fscore > global_best_fscore and best_state is not None:
@@ -254,7 +265,14 @@ class Solver:
         with open(os.path.join(self.config.score_dir, 'cv_summary.json'), 'w') as f:
             json.dump(
                 {
-                    'folds': fold_results,
+                    'folds': [
+                        {
+                            'fold': r['fold'],
+                            'best_val_fscore': r['best_val_fscore'],
+                            'epoch_history': r.get('epoch_history', []),
+                        }
+                        for r in fold_results
+                    ],
                     'mean_val_fscore': float(np.mean(fscores)),
                     'std_val_fscore': float(np.std(fscores)),
                 },
