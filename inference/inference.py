@@ -254,41 +254,51 @@ def _print_results(
 
 
 def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str) -> None:
-    all_epochs = sorted({
-        ep for s in split_ids for ep in all_epoch_results.get(s, {})
-    })
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.utils import get_column_letter
 
-    rows: Dict = {'Epoch': all_epochs}
-    avg_fs: Dict[int, float] = {}
-    avg_ks: Dict[int, float] = {}
-    avg_ss: Dict[int, float] = {}
+    split_ids_sorted = sorted(split_ids)
+    n_splits = len(split_ids_sorted)
+    all_epochs = sorted({ep for s in split_ids_sorted for ep in all_epoch_results.get(s, {})})
+
+    n_present: List[int] = []
+    avg_fs_row: List[float] = []
+    avg_ks_row: List[float] = []
+    avg_ss_row: List[float] = []
 
     for ep in all_epochs:
-        vf = [all_epoch_results[s][ep][0] for s in split_ids if ep in all_epoch_results.get(s, {})]
-        vk = [all_epoch_results[s][ep][1] for s in split_ids if ep in all_epoch_results.get(s, {})]
-        vs = [all_epoch_results[s][ep][2] for s in split_ids if ep in all_epoch_results.get(s, {})]
-        avg_fs[ep] = float(np.nanmean(vf)) if vf else float('nan')
-        avg_ks[ep] = float(np.nanmean(vk)) if vk else float('nan')
-        avg_ss[ep] = float(np.nanmean(vs)) if vs else float('nan')
+        present = [s for s in split_ids_sorted if ep in all_epoch_results.get(s, {})]
+        n_present.append(len(present))
+        if present:
+            avg_fs_row.append(float(np.nanmean([all_epoch_results[s][ep][0] for s in present])))
+            avg_ks_row.append(float(np.nanmean([all_epoch_results[s][ep][1] for s in present])))
+            avg_ss_row.append(float(np.nanmean([all_epoch_results[s][ep][2] for s in present])))
+        else:
+            avg_fs_row.append(float('nan'))
+            avg_ks_row.append(float('nan'))
+            avg_ss_row.append(float('nan'))
 
-    for s in split_ids:
+    rows: Dict = {'Epoch': all_epochs}
+    for s in split_ids_sorted:
         er = all_epoch_results.get(s, {})
-        rows[f'F-score Split {s}'] = [er.get(ep, (None,))[0] for ep in all_epochs]
-        rows[f'Kendall Split {s}'] = [er.get(ep, (None, None))[1] for ep in all_epochs]
-        rows[f'Spearman Split {s}'] = [er.get(ep, (None, None, None))[2] for ep in all_epochs]
+        rows[f'F-score Split {s}']  = [er[ep][0] if ep in er else None for ep in all_epochs]
+        rows[f'Kendall Split {s}']  = [er[ep][1] if ep in er else None for ep in all_epochs]
+        rows[f'Spearman Split {s}'] = [er[ep][2] if ep in er else None for ep in all_epochs]
 
-    rows['Avg F-score'] = [avg_fs[ep] for ep in all_epochs]
-    rows['Avg Kendall'] = [avg_ks[ep] for ep in all_epochs]
-    rows['Avg Spearman'] = [avg_ss[ep] for ep in all_epochs]
+    rows['Avg F-score']  = avg_fs_row
+    rows['Avg Kendall']  = avg_ks_row
+    rows['Avg Spearman'] = avg_ss_row
+    rows['N Splits']     = n_present
 
     df = pd.DataFrame(rows).set_index('Epoch')
 
     tuples = []
-    for s in split_ids:
+    for s in split_ids_sorted:
         for m in ('F-score', 'Kendall', 'Spearman'):
             tuples.append((f'Split {s}', m))
     for m in ('F-score', 'Kendall', 'Spearman'):
         tuples.append(('Average', m))
+    tuples.append(('Average', 'N Splits'))
     df.columns = pd.MultiIndex.from_tuples(tuples)
 
     xlsx_path = f'{dataset}_epoch_metrics.xlsx'
@@ -296,13 +306,39 @@ def _save_xlsx(split_ids: List[int], all_epoch_results: Dict, dataset: str) -> N
 
     wb = load_workbook(xlsx_path)
     ws = wb.active
+
     ws.merge_cells('A1:A2')
     cell = ws['A1']
     cell.value = 'Epoch'
     cell.alignment = Alignment(horizontal='center', vertical='center')
     ws.delete_rows(3, 1)
-    wb.save(xlsx_path)
 
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    fill_full    = PatternFill('solid', start_color='C6EFCE')
+    fill_partial = PatternFill('solid', start_color='FFEB9C')
+    fill_missing = PatternFill('solid', start_color='FFC7CE')
+    bold_font    = Font(bold=True)
+
+    for row in ws.iter_rows(min_row=3, max_row=max_row):
+        n_cell = row[max_col - 1]
+        try:
+            n = int(n_cell.value) if n_cell.value is not None else 0
+        except (TypeError, ValueError):
+            n = 0
+
+        fill = fill_full if n == n_splits else (fill_partial if n > 1 else fill_missing)
+        n_cell.fill = fill
+
+        for cell in row[-(3 + 1):]:
+            cell.font = bold_font
+
+    for col_cells in ws.columns:
+        length = max((len(str(c.value)) if c.value is not None else 0) for c in col_cells)
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(length + 2, 20)
+
+    wb.save(xlsx_path)
     print(f'Full epoch metrics saved → {xlsx_path}')
 
 
