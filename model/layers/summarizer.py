@@ -55,7 +55,7 @@ class xLSTM(nn.Module):
             ext_v=self.cross_v,
         )
 
-        x_combined = self.fusion_proj(x_mlstm) + fusion_proj(x_slstm)
+        x_combined = self.fusion_proj(x_mlstm) + self.fusion_proj(x_slstm)
 
         x_ref = self.temporal_refine(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
         x_combined = self.norm(x_combined + x_ref)
