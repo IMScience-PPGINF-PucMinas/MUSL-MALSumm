@@ -153,6 +153,14 @@ class Solver:
             })
             print(f'  Best F-score for fold {fold_idx+1}: {best_fscore:.2f}%')
 
+            # save best model of this fold
+            if best_state is not None:
+                fold_dir = os.path.join(self.config.save_dir, f'fold{fold_idx + 1}')
+                os.makedirs(fold_dir, exist_ok=True)
+                fold_best_path = os.path.join(fold_dir, 'best_model.pkl')
+                torch.save(best_state, fold_best_path)
+                tqdm.write(f'Fold {fold_idx+1} best model saved: {fold_best_path}')
+
             if best_fscore > global_best_fscore and best_state is not None:
                 global_best_fscore = best_fscore
                 global_best_state = best_state
@@ -161,11 +169,12 @@ class Solver:
 
         if global_best_state is not None:
             self.model.load_state_dict(global_best_state)
-            best_model_path = os.path.join(self.config.save_dir, 'best_model.pkl')
+            # split-level best: lives directly in save_dir/
             os.makedirs(self.config.save_dir, exist_ok=True)
+            best_model_path = os.path.join(self.config.save_dir, 'best_model.pkl')
             torch.save(global_best_state, best_model_path)
             tqdm.write(
-                f'Best model saved at {best_model_path} '
+                f'Split best model saved at {best_model_path} '
                 f'(F-score: {global_best_fscore:.2f}%)'
             )
 
@@ -243,8 +252,9 @@ class Solver:
         fscore: float,
         fold_idx: int,
     ) -> None:
-        os.makedirs(self.config.save_dir, exist_ok=True)
-        ckpt_path = os.path.join(self.config.save_dir, f'epoch-{epoch_i}.pkl')
+        fold_dir = os.path.join(self.config.save_dir, f'fold{fold_idx + 1}')
+        os.makedirs(fold_dir, exist_ok=True)
+        ckpt_path = os.path.join(fold_dir, f'epoch-{epoch_i}.pkl')
         torch.save(state_dict, ckpt_path)
         tqdm.write(
             f'Checkpoint saved: {ckpt_path}  '

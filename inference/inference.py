@@ -175,24 +175,77 @@ def run_inference(
     return mean_fscore, mean_kendall, mean_spearman, video_summaries
 
 
+def _find_fold_dirs(split_path: str) -> List[str]:
+    """Return sorted list of fold sub-directories inside a split path."""
+    if not os.path.isdir(split_path):
+        return []
+    dirs = [d for d in os.listdir(split_path)
+            if re.match(r'fold\d+', d) and os.path.isdir(join(split_path, d))]
+    return sorted(dirs, key=lambda d: int(re.findall(r'\d+', d)[0]))
+
+
 def _scan_split_worker(args: tuple) -> Tuple[int, int, Dict]:
-    (split_id, model_path, epoch_files,
-     dataset_path, test_keys,
+    (split_id, split_path, dataset_path, test_keys,
      eval_metric, dataset, model_kwargs, verbose) = args
 
+    fold_dirs = _find_fold_dirs(split_path)
+    if not fold_dirs:
+        # legacy layout: epoch files directly in split_path
+        epoch_files = _find_epoch_files(split_path)
+        results: Dict[int, Tuple[float, float, float]] = {}
+        for fname in epoch_files:
+            epoch_num = int(re.findall(r'\d+', fname)[0])
+            model = _load_model(split_path, fname, model_kwargs)
+            fs, kt, sp, *_ = run_inference(
+                model, dataset_path, test_keys,
+                eval_metric, save_summary=False,
+                dataset=dataset, verbose=verbose,
+            )
+            results[epoch_num] = (fs, kt, sp)
+        best_epoch = max(results, key=lambda e: results[e][0]) if results else -1
+        return split_id, best_epoch, results
+
+    # new layout: aggregate over folds, key = epoch within fold dir
+    # results keyed as (fold_idx, epoch_num) → (fs, kt, sp)
+    fold_epoch_results: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
+    fold_best: Dict[int, Tuple[float, float, float]] = {}  # fold_idx → best metrics
+
+    for fold_dir in fold_dirs:
+        fold_idx = int(re.findall(r'\d+', fold_dir)[0])
+        fold_path = join(split_path, fold_dir)
+        epoch_files = _find_epoch_files(fold_path)
+        fold_results: Dict[int, Tuple[float, float, float]] = {}
+
+        for fname in epoch_files:
+            epoch_num = int(re.findall(r'\d+', fname)[0])
+            model = _load_model(fold_path, fname, model_kwargs)
+            fs, kt, sp, *_ = run_inference(
+                model, dataset_path, test_keys,
+                eval_metric, save_summary=False,
+                dataset=dataset, verbose=verbose,
+            )
+            fold_results[epoch_num] = (fs, kt, sp)
+            fold_epoch_results[(fold_idx, epoch_num)] = (fs, kt, sp)
+
+        if fold_results:
+            best_ep = max(fold_results, key=lambda e: fold_results[e][0])
+            fold_best[fold_idx] = fold_results[best_ep]
+
+    # aggregate across folds: mean per epoch (averaged over all folds that have it)
+    epoch_nums = sorted({ep for (_, ep) in fold_epoch_results})
     results: Dict[int, Tuple[float, float, float]] = {}
+    for ep in epoch_nums:
+        vals = [fold_epoch_results[(fi, ep)]
+                for fi in range(1, len(fold_dirs) + 1)
+                if (fi, ep) in fold_epoch_results]
+        if vals:
+            results[ep] = (
+                float(np.nanmean([v[0] for v in vals])),
+                float(np.nanmean([v[1] for v in vals])),
+                float(np.nanmean([v[2] for v in vals])),
+            )
 
-    for fname in epoch_files:
-        epoch_num = int(re.findall(r'\d+', fname)[0])
-        model = _load_model(model_path, fname, model_kwargs)
-        fs, kt, sp, *_ = run_inference(
-            model, dataset_path, test_keys,
-            eval_metric, save_summary=False,
-            dataset=dataset, verbose=verbose,
-        )
-        results[epoch_num] = (fs, kt, sp)
-
-    best_epoch = max(results, key=lambda e: results[e][0])
+    best_epoch = max(results, key=lambda e: results[e][0]) if results else -1
     return split_id, best_epoch, results
 
 
@@ -393,18 +446,19 @@ def main() -> None:
     if save_results:
         split_configs: Dict = {}
         for split_id in split_ids:
-            model_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
+            split_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
             test_keys = (
                 split_data[split_id]['test_keys']
                 if isinstance(split_data, list)
                 else split_data['test_keys']
             )
-            epoch_files = _find_epoch_files(model_path)
-            if not epoch_files:
-                logging.warning(f'No epoch files in {model_path} — skipping split {split_id}')
+            fold_dirs = _find_fold_dirs(split_path)
+            has_epochs = bool(_find_epoch_files(split_path))
+            if not fold_dirs and not has_epochs:
+                logging.warning(f'No fold dirs or epoch files in {split_path} — skipping split {split_id}')
                 continue
             split_configs[split_id] = (
-                split_id, model_path, epoch_files,
+                split_id, split_path,
                 dataset_path, test_keys,
                 eval_metric, dataset, model_kwargs, verbose,
             )
@@ -422,28 +476,52 @@ def main() -> None:
 
     else:
         for split_id in split_ids:
-            model_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
+            split_path = f'Summaries/xLSTM/{dataset}{model_version}/models/split{split_id}'
             test_keys = (
                 split_data[split_id]['test_keys']
                 if isinstance(split_data, list)
                 else split_data['test_keys']
             )
-            epoch_files = _find_epoch_files(model_path)
-            if not epoch_files:
-                logging.warning(f'No epoch files in {model_path} — skipping split {split_id}')
-                continue
 
-            best_epoch = _load_best_epoch_from_fscores(model_path)
-            if best_epoch is not None:
-                best_pkl = join(model_path, 'best_model.pkl')
-                fname = 'best_model.pkl' if os.path.exists(best_pkl) else f'epoch-{best_epoch}.pkl'
-                print(f'Split {split_id}: epoch {best_epoch} (from f_scores.txt)')
+            # prefer split-level best_model.pkl (saved after all folds)
+            split_best_pkl = join(split_path, 'best_model.pkl')
+            if os.path.exists(split_best_pkl):
+                model = _load_model(split_path, 'best_model.pkl', model_kwargs)
+                best_epoch = -1
+                print(f'Split {split_id}: using split best_model.pkl')
             else:
-                fname = epoch_files[-1]
-                best_epoch = int(re.findall(r'\d+', fname)[0])
-                print(f'Split {split_id}: f_scores.txt not found — using last epoch ({best_epoch})')
+                # fall back to best fold best_model.pkl
+                fold_dirs = _find_fold_dirs(split_path)
+                fold_pkls = [(join(split_path, fd, 'best_model.pkl'), fd)
+                             for fd in fold_dirs
+                             if os.path.exists(join(split_path, fd, 'best_model.pkl'))]
+                if fold_pkls:
+                    # pick fold whose best_model.pkl gives best F-score
+                    best_fs_fold, best_model, best_fold = -1.0, None, None
+                    for pkl_path, fd in fold_pkls:
+                        m = _load_model(os.path.dirname(pkl_path), 'best_model.pkl', model_kwargs)
+                        fs_tmp, *_ = run_inference(m, dataset_path, test_keys,
+                                                   eval_metric, False, dataset, verbose)
+                        if fs_tmp > best_fs_fold:
+                            best_fs_fold, best_model, best_fold = fs_tmp, m, fd
+                    model = best_model
+                    best_epoch = -1
+                    print(f'Split {split_id}: using best_model.pkl from {best_fold}')
+                else:
+                    # legacy fallback: epoch files directly in split_path
+                    epoch_files = _find_epoch_files(split_path)
+                    if not epoch_files:
+                        logging.warning(f'No checkpoints found in {split_path} — skipping split {split_id}')
+                        continue
+                    best_epoch = _load_best_epoch_from_fscores(split_path)
+                    if best_epoch is not None:
+                        fname = 'best_model.pkl' if os.path.exists(join(split_path, 'best_model.pkl')) else f'epoch-{best_epoch}.pkl'
+                    else:
+                        fname = epoch_files[-1]
+                        best_epoch = int(re.findall(r'\d+', fname)[0])
+                    model = _load_model(split_path, fname, model_kwargs)
+                    print(f'Split {split_id}: legacy fallback epoch {best_epoch}')
 
-            model = _load_model(model_path, fname, model_kwargs)
             fs, kt, sp, *_ = run_inference(
                 model, dataset_path, test_keys,
                 eval_metric, save_summary, dataset, verbose,
