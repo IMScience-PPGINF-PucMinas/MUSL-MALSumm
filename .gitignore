@@ -207,6 +207,8 @@ marimo/_lsp/
 __marimo__/
 data/SumMe/eccv16_dataset_summe_google_pool5.h5
 data/TVSum/eccv16_dataset_tvsum_google_pool5.h5
+data/OVP/eccv16_dataset_ovp_google_pool5.h5
+data/YouTube/eccv16_dataset_youtube_google_pool5.h5
 Summaries/
 SumMe_epoch_metrics.xlsx
 TVSum_epoch_metrics.xlsx
