@@ -18,6 +18,7 @@ class xLSTM(nn.Module):
         self.num_segments = num_segments
 
         self.input_proj = nn.Conv1d(input_size, hidden_dim, kernel_size=1)
+        self.conv_fusion = nn.Conv1d(input_size * 3, hidden_dim, kernel_size=1)
         self.slstm = sLSTM(input_size, hidden_dim, dropout=dropout)
         self.mlstm = mLSTM(input_size, hidden_dim, num_layers=num_layers, dropout=dropout)
         self.cross_k = nn.Linear(input_size, hidden_dim)
@@ -55,7 +56,7 @@ class xLSTM(nn.Module):
             ext_v=self.cross_v,
         )
 
-        x_combined = self.fusion_proj(x_mlstm) + self.fusion_proj(x_slstm)
+        x_combined = torch.cat([self.fusion_proj(x_mlstm), self.fusion_proj(x_slstm), residual], dim=1)
 
         x_ref = self.temporal_refine(x_combined.permute(0, 2, 1)).permute(0, 2, 1)
         x_combined = self.norm(x_combined + x_ref)
