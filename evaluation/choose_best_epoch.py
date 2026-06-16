@@ -8,10 +8,7 @@ import sys
 # with args (example usage: python choose_best_epoch.py <path_to_experiment> TVSum)
 exp_path = sys.argv[1]
 dataset = sys.argv[2]
-''' without args
-exp_path = "../PGL-SUM/Summaries/PGL-SUM/exp1"
-dataset = "SumMe"
-'''
+
 
 
 def train_logs(log_file):
