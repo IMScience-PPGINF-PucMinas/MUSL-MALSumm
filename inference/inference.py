@@ -13,39 +13,57 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils.utils import get_paths, setup_logging
 from evaluation.evaluation_metrics import evaluate_summary
 from model.layers.summarizer import xLSTM
-from inference.generate_summary import generate_summary
+from inference.generate_summary import generate_summary, expand_scores_to_frames
 from scipy.stats import kendalltau, spearmanr
 
 setup_logging()
 
 
 # ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+
+def _get_device():
+    """Return the best available torch device (CUDA > CPU)."""
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_video_data(dataset, data_path, video):
-    """Load video data from the dataset h5 file."""
-    with h5py.File(data_path, "r") as hdf:
-        frame_features = torch.Tensor(
-            np.array(hdf[f"{video}/features"])
-        ).view(-1, 1024)
-        sb         = np.array(hdf[f"{video}/change_points"])
-        video_name = None
+def load_video_data(dataset, hdf, video):
+    """Load video data for a single video from an already-open HDF5 handle.
 
-        if dataset.lower() in ('summe', 'tvsum'):
-            user_summary = np.array(hdf[f"{video}/user_summary"])
-            n_frames     = np.array(hdf[f"{video}/n_frames"])
-            positions    = np.array(hdf[f"{video}/picks"])
-            if "video_name" in hdf[f"{video}"]:
-                video_name = str(
-                    np.array(hdf[f"{video}/video_name"]).astype(str, copy=False)
-                )
-        elif dataset.lower() == 'mrhisum':
-            user_summary = np.array(hdf[f"{video}/gt_summary"])
-            n_frames     = frame_features.shape[0]
-            positions    = np.arange(n_frames, dtype=int)
-        else:
-            raise ValueError(f"Unsupported dataset: {dataset}")
+    Accepting the open handle (rather than the file path) allows the caller to
+    keep the file open across all videos in a split, avoiding repeated open/close
+    overhead that is measurable on datasets with many videos.
+
+    :param str dataset: Dataset name (SumMe | TVSum | MrHiSum).
+    :param h5py.File hdf: Open HDF5 file handle (read mode).
+    :param str video: HDF5 group key for the target video.
+    :return: tuple (frame_features, user_summary, sb, n_frames, positions, video_name)
+    """
+    frame_features = torch.Tensor(
+        np.array(hdf[f"{video}/features"])
+    ).view(-1, 1024)
+    sb         = np.array(hdf[f"{video}/change_points"])
+    video_name = None
+
+    if dataset.lower() in ('summe', 'tvsum'):
+        user_summary = np.array(hdf[f"{video}/user_summary"])
+        n_frames     = np.array(hdf[f"{video}/n_frames"])
+        positions    = np.array(hdf[f"{video}/picks"])
+        if "video_name" in hdf[f"{video}"]:
+            video_name = str(
+                np.array(hdf[f"{video}/video_name"]).astype(str, copy=False)
+            )
+    elif dataset.lower() == 'mrhisum':
+        user_summary = np.array(hdf[f"{video}/gt_summary"])
+        n_frames     = frame_features.shape[0]
+        positions    = np.arange(n_frames, dtype=int)
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}")
 
     return frame_features, user_summary, sb, n_frames, positions, video_name
 
@@ -86,13 +104,25 @@ def _load_best_epoch_from_fscores(model_path):
 # ---------------------------------------------------------------------------
 
 def run_inference(model, data_path, keys, eval_method, save_summary,
-                  dataset, verbose=False):
+                  dataset, device=None, verbose=False):
     """Run inference for a single model checkpoint over all test videos.
+
+    The HDF5 file is opened once for the entire split and reused across
+    videos, eliminating per-video open/close overhead.
+
+    The model is moved to *device* before inference; features are moved
+    to the same device so that the forward pass executes on GPU when available.
+
+    frame_scores for Kendall/Spearman are now computed via expand_scores_to_frames
+    (shared with generate_summary) instead of duplicating the expansion logic.
 
     Returns:
         mean_fscore, mean_kendall, mean_spearman,
         video_summaries, [video_names if SumMe]
     """
+    if device is None:
+        device = next(model.parameters()).device
+
     model.eval()
 
     video_fscores   = []
@@ -102,66 +132,69 @@ def run_inference(model, data_path, keys, eval_method, save_summary,
     video_names     = {}
     summe = (dataset.lower() == 'summe')
 
-    for video in keys:
-        if summe:
-            try:
-                if int(video.split('_')[1]) > 25:
-                    continue
-            except (IndexError, ValueError):
-                pass
+    # Single HDF5 open for the entire split
+    with h5py.File(data_path, "r") as hdf:
+        for video in keys:
+            if summe:
+                try:
+                    if int(video.split('_')[1]) > 25:
+                        continue
+                except (IndexError, ValueError):
+                    pass
 
-        frame_features, user_summary, sb, n_frames, positions, vname = \
-            load_video_data(dataset, data_path, video)
+            frame_features, user_summary, sb, n_frames, positions, vname = \
+                load_video_data(dataset, hdf, video)
 
-        with torch.no_grad():
-            scores, _ = model(frame_features)
-            scores = scores.squeeze(0).cpu().numpy().tolist()
+            # Move features to GPU (no-op if device is CPU)
+            frame_features = frame_features.to(device)
 
-        summary = generate_summary([sb], [scores], [n_frames], [positions])[0]
-        f_score = evaluate_summary(summary, user_summary, eval_method)
+            with torch.no_grad():
+                scores, _ = model(frame_features)
+                scores = scores.squeeze(0).cpu().numpy().tolist()
 
-        frame_init_scores = np.array(scores)
-        frame_scores      = np.zeros(n_frames, dtype=float)
-        pos = positions.astype(int)
-        if pos[-1] != n_frames:
-            pos = np.concatenate([pos, [n_frames]])
-        for i in range(len(pos) - 1):
-            frame_scores[pos[i]:pos[i + 1]] = frame_init_scores[i]
+            summary = generate_summary([sb], [scores], [n_frames], [positions])[0]
+            f_score = evaluate_summary(summary, user_summary, eval_method)
 
-        gt_importance = (
-            user_summary.mean(axis=0) if user_summary.ndim > 1 else user_summary
-        )
-
-        if frame_scores.shape[0] != gt_importance.shape[0]:
-            logging.warning(
-                f"Shape mismatch for {video}: "
-                f"pred={frame_scores.shape[0]}, gt={gt_importance.shape[0]}"
-                " — skipping correlations"
-            )
-            ktau, spr = float('nan'), float('nan')
-        else:
-            ktau, _ = kendalltau(frame_scores, gt_importance)
-            spr,  _ = spearmanr(frame_scores,  gt_importance)
-
-        video_fscores.append(f_score)
-        video_kendalls.append(ktau)
-        video_spearmans.append(spr)
-        video_summaries[video] = summary
-
-        if summe:
-            video_names[video] = vname
-
-        if verbose:
-            logging.info(
-                f"  {video} ({vname}): F1={f_score:.2f}%  τ={ktau:.4f}  ρ={spr:.4f}"
+            # Expand sub-sampled scores to full frame sequence (shared utility —
+            # no duplication of the propagation logic that lives in generate_summary)
+            frame_scores = expand_scores_to_frames(
+                np.array(scores), positions, int(n_frames)
             )
 
-        if save_summary:
-            out   = {str(i): int(v) for i, v in enumerate(summary)}
-            fname = f"{video}_summary.json"
-            with open(fname, "w") as fp:
-                json.dump(out, fp, indent=4)
-            print(f"Summary saved → {fname}")
+            gt_importance = (
+                user_summary.mean(axis=0) if user_summary.ndim > 1 else user_summary
+            )
+
+            if frame_scores.shape[0] != gt_importance.shape[0]:
+                logging.warning(
+                    f"Shape mismatch for {video}: "
+                    f"pred={frame_scores.shape[0]}, gt={gt_importance.shape[0]}"
+                    " — skipping correlations"
+                )
+                ktau, spr = float('nan'), float('nan')
+            else:
+                ktau, _ = kendalltau(frame_scores, gt_importance)
+                spr,  _ = spearmanr(frame_scores,  gt_importance)
+
+            video_fscores.append(f_score)
+            video_kendalls.append(ktau)
+            video_spearmans.append(spr)
+            video_summaries[video] = summary
+
+            if summe:
+                video_names[video] = vname
+
+            if verbose:
+                logging.info(
+                    f"  {video} ({vname}): F1={f_score:.2f}%  τ={ktau:.4f}  ρ={spr:.4f}"
+                )
+
+            if save_summary:
+                out   = {str(i): int(v) for i, v in enumerate(summary)}
+                fname = f"{video}_summary.json"
+                with open(fname, "w") as fp:
+                    json.dump(out, fp, indent=4)
+                print(f"Summary saved → {fname}")
 
     mean_fscore   = float(np.nanmean(video_fscores))
     mean_kendall  = float(np.nanmean(video_kendalls))
@@ -183,6 +216,14 @@ def _scan_split_worker(args):
     All arguments are plain Python objects (pickle-safe) — no live model or
     tensor objects are passed across the process boundary.
 
+    The model is instantiated once per split and reused across all epochs:
+    only load_state_dict is called per epoch, avoiding repeated constructor and
+    memory allocation overhead.
+
+    GPU is used when available. In multi-process mode each worker claims the
+    same default CUDA device; if multiple GPUs are present, assign
+    CUDA_VISIBLE_DEVICES externally or pass a device index via model_kwargs.
+
     Args:
         args: tuple of
             (split_id, model_path, epoch_files, dataset_path,
@@ -196,20 +237,24 @@ def _scan_split_worker(args):
      dataset_path, test_keys,
      eval_metric, dataset, model_kwargs, verbose) = args
 
+    device = _get_device()
+
+    # Instantiate the model once and reuse across all epochs
+    model = xLSTM(**model_kwargs).to(device)
+    model.eval()
+
     results = {}
     for fname in epoch_files:
         epoch_num = int(re.findall(r'\d+', fname)[0])
 
-        # Each worker instantiates its own model — no shared state
-        model = xLSTM(**model_kwargs)
-        model.load_state_dict(
-            torch.load(join(model_path, fname), map_location='cpu')
-        )
+        # Swap weights only — no reallocation
+        state_dict = torch.load(join(model_path, fname), map_location=device)
+        model.load_state_dict(state_dict)
 
         fs, kt, sp, *_ = run_inference(
             model, dataset_path, test_keys,
             eval_metric, save_summary=False,
-            dataset=dataset, verbose=verbose,
+            dataset=dataset, device=device, verbose=verbose,
         )
         results[epoch_num] = (fs, kt, sp)
 
@@ -402,13 +447,14 @@ def main():
     with open(split_file) as fp:
         split_data = json.load(fp)
 
-    print(f"\nDataset: {dataset}  |  eval: {eval_metric}  |  splits: {split_ids}")
+    device = _get_device()
+    print(f"\nDataset: {dataset}  |  eval: {eval_metric}  |  splits: {split_ids}"
+          f"  |  device: {device}")
 
     # -----------------------------------------------------------------------
     # Full scan path (--save_results 1): parallel processing across splits
     # -----------------------------------------------------------------------
     if save_results:
-        # Build one args-tuple per split — all plain Python objects, pickle-safe
         split_configs = {}
         for split_id in split_ids:
             model_path = (
@@ -451,7 +497,7 @@ def main():
             all_epoch_results[sid] = results
 
     # -----------------------------------------------------------------------
-    # Fast path (--save_results 0): one inference per split
+    # Fast path (--save_results 0): one inference per split, GPU-accelerated
     # -----------------------------------------------------------------------
     else:
         best_epochs   = {}
@@ -494,11 +540,14 @@ def main():
 
             model = xLSTM(**model_kwargs)
             model.load_state_dict(
-                torch.load(join(model_path, fname), map_location='cpu')
+                torch.load(join(model_path, fname), map_location=device)
             )
+            model = model.to(device)
+
             fs, kt, sp, *_ = run_inference(
                 model, dataset_path, test_keys,
-                eval_metric, save_summary, dataset, verbose,
+                eval_metric, save_summary, dataset,
+                device=device, verbose=verbose,
             )
             best_epochs[split_id]   = best_epoch
             split_results[split_id] = (fs, kt, sp)
