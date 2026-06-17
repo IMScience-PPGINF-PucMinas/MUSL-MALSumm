@@ -33,9 +33,11 @@ class Config:
     def set_dataset_dir(self, video_type='TVSum'):
         """Set directories for logs, scores, and models based on the dataset type."""
         paths = get_paths(video_type)
-        self.log_dir = f"{paths['log_dir']}/split{self.split_index}"
-        self.score_dir = f"{paths['score_dir']}/split{self.split_index}"
-        self.save_dir = f"{paths['save_dir']}/split{self.split_index}"
+        self.log_dir      = f"{paths['log_dir']}/split{self.split_index}"
+        self.score_dir    = f"{paths['score_dir']}/split{self.split_index}"
+        self.save_dir     = f"{paths['save_dir']}/split{self.split_index}"
+        self.dataset_path = paths['dataset']   # HDF5 file — used by solver for F1 evaluation
+        self.dataset      = video_type         # dataset name — used by solver to select the right keys
 
     def __repr__(self):
         """Pretty-print configurations in alphabetical order."""
