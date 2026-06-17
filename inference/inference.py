@@ -9,7 +9,6 @@ import argparse
 import re
 import os
 import logging
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils.utils import get_paths, setup_logging
 from evaluation.evaluation_metrics import evaluate_summary
 from model.layers.summarizer import xLSTM
@@ -265,6 +264,13 @@ def _scan_split_worker(args):
 def _run_full_scan_parallel(split_ids, split_configs, n_workers):
     """Run full epoch scan for all splits in parallel.
 
+    Uses 'spawn' as the multiprocessing start method so that CUDA can be
+    initialized cleanly inside each worker. The default 'fork' start method
+    on Linux causes "Cannot re-initialize CUDA in forked subprocess" because
+    the CUDA context created in the parent process is inherited but unusable
+    by the child. 'spawn' starts a fresh interpreter in each worker, avoiding
+    this entirely.
+
     Args:
         split_ids:    list of split indices to process
         split_configs: dict mapping split_id → worker args tuple
@@ -273,22 +279,23 @@ def _run_full_scan_parallel(split_ids, split_configs, n_workers):
     Returns:
         dict mapping split_id → (best_epoch, results_dict)
     """
-    # Cap workers to the number of splits — no point spawning more
+    import multiprocessing as mp
+
     n_workers = min(n_workers, len(split_ids))
     print(f"Full scan: {n_workers} parallel worker(s) across {len(split_ids)} splits\n")
 
     output = {}
+    ctx    = mp.get_context("spawn")
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(_scan_split_worker, split_configs[s]): s
+    with ctx.Pool(processes=n_workers) as pool:
+        async_results = {
+            s: pool.apply_async(_scan_split_worker, (split_configs[s],))
             for s in split_ids
         }
 
-        for future in as_completed(futures):
-            split_id = futures[future]
+        for split_id, ar in async_results.items():
             try:
-                sid, best_epoch, results = future.result()
+                sid, best_epoch, results = ar.get()
                 output[sid] = (best_epoch, results)
                 best_fs = results[best_epoch][0]
                 print(
