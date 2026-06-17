@@ -247,6 +247,7 @@ class Solver:
 
         # Persist to f_scores.txt (one float per line, index == epoch number)
         self._f_scores_history.append(mean_f1)
+        os.makedirs(self.config.save_dir, exist_ok=True)
         fscores_path = os.path.join(self.config.save_dir, 'f_scores.txt')
         with open(fscores_path, 'w') as fp:
             json.dump(self._f_scores_history, fp)
