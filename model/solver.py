@@ -9,6 +9,8 @@ import torch.optim as optim
 from tqdm import tqdm, trange
 from .layers.summarizer import xLSTM
 from utils.tensorboard_utils import TensorboardWriter
+from evaluation.evaluation_metrics import evaluate_summary
+from inference.generate_summary import generate_summary
 
 
 class Solver:
@@ -20,6 +22,9 @@ class Solver:
         self.config = config
         self.train_loader = train_loader
         self.test_loader = test_loader
+
+        # Accumulated F1 score per epoch — written to f_scores.txt after each evaluate()
+        self._f_scores_history = []
 
         self._set_random_seed()
 
@@ -109,8 +114,6 @@ class Solver:
             target = target.to(self.config.device)
 
             output, _ = self.model(frame_features.squeeze(0))
-
-            # FIX: squeeze(0) em vez da lógica condicional quebrada
             output_adjusted = output.squeeze(0)
 
             loss = nn.MSELoss()(output_adjusted, target.squeeze(0))
@@ -138,9 +141,22 @@ class Solver:
         torch.save(self.model.state_dict(), ckpt_path)
 
     def evaluate(self, epoch_i, save_weights=False):
+        """Run evaluation for one epoch.
+
+        In addition to saving per-video scores (existing behaviour), computes the
+        mean F1-score over all test videos and appends it to f_scores.txt inside
+        the checkpoint directory. inference.py reads this file in its fast path to
+        select the best epoch without scanning all checkpoints.
+        """
         self.model.eval()
         out_scores_dict = {}
         weights_save_path = os.path.join(self.config.score_dir, "weights.h5")
+
+        all_scores    = []
+        all_shot_bounds = []
+        all_nframes   = []
+        all_positions = []
+        all_user_summaries = []
 
         for idx in trange(len(self.test_loader), desc='Evaluate', ncols=80, leave=False):
             frame_features, video_name = self.test_loader[idx]
@@ -150,7 +166,101 @@ class Solver:
             if save_weights:
                 self._save_attention_weights(weights_save_path, video_name, epoch_i, attn_weights)
 
+            # Collect data needed for F1 computation
+            video_data = self._load_video_eval_data(video_name)
+            if video_data is not None:
+                sb, n_frames, positions, user_summary = video_data
+                all_scores.append(scores)
+                all_shot_bounds.append(sb)
+                all_nframes.append(n_frames)
+                all_positions.append(positions)
+                all_user_summaries.append(user_summary)
+
         self._save_scores(out_scores_dict, epoch_i)
+
+        # Compute and persist mean F1 for this epoch
+        mean_f1 = self._compute_and_log_f1(
+            epoch_i, all_scores, all_shot_bounds, all_nframes,
+            all_positions, all_user_summaries,
+        )
+        return mean_f1
+
+    def _load_video_eval_data(self, video_name):
+        """Load shot boundaries, n_frames, positions, and user_summary for a video.
+
+        Returns None if the dataset file or video key is unavailable, so that F1
+        computation degrades gracefully rather than crashing the training loop.
+        """
+        dataset_attr = getattr(self.config, 'dataset_path', None) \
+                    or getattr(self.config, 'data_path', None)
+        if dataset_attr is None:
+            return None
+
+        try:
+            with h5py.File(dataset_attr, 'r') as hdf:
+                if video_name not in hdf:
+                    return None
+
+                sb = np.array(hdf[f"{video_name}/change_points"])
+
+                dataset_name = getattr(self.config, 'dataset', '').lower()
+                if dataset_name in ('summe', 'tvsum'):
+                    user_summary = np.array(hdf[f"{video_name}/user_summary"])
+                    n_frames     = int(np.array(hdf[f"{video_name}/n_frames"]))
+                    positions    = np.array(hdf[f"{video_name}/picks"])
+                elif dataset_name == 'mrhisum':
+                    user_summary = np.array(hdf[f"{video_name}/gt_summary"])
+                    n_frames     = int(np.array(hdf[f"{video_name}/features"]).shape[0])
+                    positions    = np.arange(n_frames, dtype=int)
+                else:
+                    return None
+
+            return sb, n_frames, positions, user_summary
+        except Exception:
+            return None
+
+    def _compute_and_log_f1(self, epoch_i, all_scores, all_shot_bounds,
+                             all_nframes, all_positions, all_user_summaries):
+        """Compute mean F1 over all evaluated videos, log to TensorBoard, and
+        append to f_scores.txt so that inference.py can find the best epoch.
+
+        :param int epoch_i: Current epoch index.
+        :return float: Mean F1-score (0–100 scale), or NaN if no videos were evaluated.
+        """
+        if not all_scores:
+            return float('nan')
+
+        eval_method = getattr(self.config, 'eval_method', 'max')
+
+        summaries = generate_summary(all_shot_bounds, all_scores, all_nframes, all_positions)
+
+        f_scores = []
+        for summary, user_summary in zip(summaries, all_user_summaries):
+            f_scores.append(evaluate_summary(summary, user_summary, eval_method))
+
+        mean_f1 = float(np.nanmean(f_scores))
+        tqdm.write(f'Epoch {epoch_i} — mean F1: {mean_f1:.2f}%')
+
+        # Log to TensorBoard
+        if self.writer is not None:
+            self.writer.update_loss(mean_f1, epoch_i, 'f1_epoch')
+
+        # Persist to f_scores.txt (one float per line, index == epoch number)
+        self._f_scores_history.append(mean_f1)
+        fscores_path = os.path.join(self.config.save_dir, 'f_scores.txt')
+        with open(fscores_path, 'w') as fp:
+            json.dump(self._f_scores_history, fp)
+
+        # Keep best_model.pkl pointing to the highest-F1 checkpoint so that the
+        # inference fast path can load it directly without scanning all epochs.
+        best_epoch = int(np.argmax(self._f_scores_history))
+        best_src   = os.path.join(self.config.save_dir, f'epoch-{best_epoch}.pkl')
+        best_dst   = os.path.join(self.config.save_dir, 'best_model.pkl')
+        if os.path.exists(best_src):
+            import shutil
+            shutil.copy2(best_src, best_dst)
+
+        return mean_f1
 
     def _evaluate_video(self, frame_features):
         """Evaluate a single video."""
@@ -167,7 +277,7 @@ class Solver:
             weights.create_dataset(f"{video_name}/epoch_{epoch_i}", data=attn_weights)
 
     def _save_scores(self, out_scores_dict, epoch_i):
-        """Save evaluation scores."""
+        """Save per-video importance scores for the current epoch."""
         os.makedirs(self.config.score_dir, exist_ok=True)
 
         scores_save_path = os.path.join(
@@ -177,6 +287,7 @@ class Solver:
             if self.config.verbose:
                 tqdm.write(f'Saving scores at {scores_save_path}')
             json.dump(out_scores_dict, f)
+
 
 if __name__ == '__main__':
     pass
